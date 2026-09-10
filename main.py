@@ -10,7 +10,7 @@ from uci_engine import UCIEngine
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze one Chess.com 4PC PGN file and produce a text accuracy report."
+        description="Analyze one Chess.com 4PC PGN file and produce a Lichess-style accuracy report."
     )
     parser.add_argument("pgn", help="Path to one Chess.com 4PC PGN file")
     parser.add_argument(
@@ -37,14 +37,15 @@ def main() -> None:
     if not game.moves:
         raise ValueError("No 4PC moves were found in the PGN")
 
-    print("4PC Variant Accuracy Finder — V1.3")
+    print("4PC Variant Accuracy Finder — V2.0")
     print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
     print(f"Moves: {len(game.moves)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
-    print("MultiPV: 1 (single-PV accuracy evaluation)")
+    print("MultiPV: 1 (single-PV position evaluation)")
     print(f"Threads: {args.threads}")
-    print("Scoring: same-root unrestricted vs played-move-restricted search")
+    print("Scoring: Lichess-style before/after position evaluation")
+    print("Perspective: moving player's team (RY vs BG)")
     print()
 
     with UCIEngine(
