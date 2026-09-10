@@ -20,6 +20,10 @@ class EngineLine:
     def is_mate(self) -> bool:
         return self.mate is not None
 
+    @property
+    def is_exact(self) -> bool:
+        return self.bound is None
+
 
 @dataclass
 class SearchResult:
@@ -28,7 +32,7 @@ class SearchResult:
 
 
 class UCIEngine:
-    def __init__(self, engine_path: str, threads: int = 1, multipv: int = 3):
+    def __init__(self, engine_path: str, threads: int = 1, multipv: int = 1):
         self.engine_path = engine_path
         self.threads = threads
         self.multipv = multipv
@@ -159,13 +163,28 @@ class UCIEngine:
             return True
         return bool(new.pv) and not old.pv
 
-    def analyze(self, fen: str, moves: list[str], depth: int) -> SearchResult:
+    def analyze(
+        self,
+        fen: str,
+        moves: list[str],
+        depth: int,
+        searchmoves: list[str] | None = None,
+    ) -> SearchResult:
+        """Analyze a position, optionally restricting the root to searchmoves.
+
+        The engine requires UCI's depth token to precede searchmoves, so the
+        command is deliberately emitted as: go depth N searchmoves ...
+        """
         move_text = " ".join(moves)
         command = f"position fen {fen}"
         if move_text:
             command += f" moves {move_text}"
         self._send(command)
-        self._send(f"go depth {depth}")
+
+        go_command = f"go depth {depth}"
+        if searchmoves:
+            go_command += " searchmoves " + " ".join(searchmoves)
+        self._send(go_command)
 
         result = SearchResult()
         while True:
