@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
-from typing import TextIO
 
 
 @dataclass
@@ -15,10 +14,17 @@ class EngineLine:
     nodes: int = 0
     nps: int = 0
     time_ms: int = 0
+    bound: str | None = None
 
     @property
     def is_mate(self) -> bool:
         return self.mate is not None
+
+
+@dataclass
+class SearchResult:
+    lines: dict[int, EngineLine] = field(default_factory=dict)
+    bestmove: str | None = None
 
 
 class UCIEngine:
@@ -92,22 +98,48 @@ class UCIEngine:
         while i < len(parts):
             key = parts[i]
             if key == "depth" and i + 1 < len(parts):
-                result.depth = int(parts[i + 1]); i += 2
+                try:
+                    result.depth = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
             elif key == "multipv" and i + 1 < len(parts):
-                result.multipv = int(parts[i + 1]); i += 2
+                try:
+                    result.multipv = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
             elif key == "nodes" and i + 1 < len(parts):
-                result.nodes = int(parts[i + 1]); i += 2
+                try:
+                    result.nodes = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
             elif key == "nps" and i + 1 < len(parts):
-                result.nps = int(parts[i + 1]); i += 2
+                try:
+                    result.nps = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
             elif key == "time" and i + 1 < len(parts):
-                result.time_ms = int(parts[i + 1]); i += 2
+                try:
+                    result.time_ms = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
             elif key == "score" and i + 2 < len(parts):
                 kind, value = parts[i + 1], parts[i + 2]
-                if kind == "cp":
-                    result.score_cp = int(value)
-                elif kind == "mate":
-                    result.mate = int(value)
+                try:
+                    if kind == "cp":
+                        result.score_cp = int(value)
+                    elif kind == "mate":
+                        result.mate = int(value)
+                except ValueError:
+                    pass
                 i += 3
+                if i < len(parts) and parts[i] in {"lowerbound", "upperbound"}:
+                    result.bound = parts[i]
+                    i += 1
             elif key == "pv":
                 result.pv = parts[i + 1:]
                 break
@@ -115,7 +147,19 @@ class UCIEngine:
                 i += 1
         return result
 
-    def analyze(self, fen: str, moves: list[str], depth: int) -> dict[int, EngineLine]:
+    @staticmethod
+    def _should_replace(old: EngineLine | None, new: EngineLine) -> bool:
+        if old is None:
+            return True
+        if new.depth > old.depth:
+            return True
+        if new.depth < old.depth:
+            return False
+        if old.bound is not None and new.bound is None:
+            return True
+        return bool(new.pv) and not old.pv
+
+    def analyze(self, fen: str, moves: list[str], depth: int) -> SearchResult:
         move_text = " ".join(moves)
         command = f"position fen {fen}"
         if move_text:
@@ -123,15 +167,17 @@ class UCIEngine:
         self._send(command)
         self._send(f"go depth {depth}")
 
-        lines: dict[int, EngineLine] = {}
+        result = SearchResult()
         while True:
             line = self._readline()
             if line.startswith("info "):
                 parsed = self._parse_info(line)
                 if parsed is not None and parsed.pv:
-                    old = lines.get(parsed.multipv)
-                    if old is None or parsed.depth >= old.depth:
-                        lines[parsed.multipv] = parsed
+                    old = result.lines.get(parsed.multipv)
+                    if self._should_replace(old, parsed):
+                        result.lines[parsed.multipv] = parsed
             elif line.startswith("bestmove "):
+                parts = line.split()
+                result.bestmove = parts[1] if len(parts) > 1 else None
                 break
-        return lines
+        return result
