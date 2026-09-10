@@ -1,24 +1,26 @@
 # Variant Accuracy Finder
 
-V1 specification and project context for a four-player team-chess accuracy analyzer.
+A transparent, engine-based accuracy analyzer for four-player team chess.
 
-Maintainer / developer: Dhruv Aka Captain-Bolt
+The project reconstructs a four-player game, evaluates each consecutive position with a compatible UCI engine, converts evaluations to the perspective of the team that played the move, and produces move-level, player-level, and team-level accuracy statistics.
 
-## 1. What this project is
+Maintainer / developer: Dhruv
 
-Variant Accuracy Finder is a Python-based analyzer intended to calculate move accuracy for four-player chess games, initially targeting Chess.com 4PC games in the Teams format.
+## 1. Project overview
 
-The goal is not to reproduce a website's proprietary accuracy implementation. The first version establishes a transparent, reproducible, engine-based accuracy system that can later be validated and improved.
+Variant Accuracy Finder is designed specifically for four-player team chess. It is not a conventional two-player chess accuracy calculator with the board size or notation changed. The analyzer explicitly models the four-player turn cycle, team relationships, and side-to-move-relative engine scores.
 
-The analyzer takes one 4PC PGN game, reconstructs the game move-by-move, asks a compatible 4PC UCI engine to evaluate the position before and after every move, compares the played move with the best available move, calculates move accuracy using the agreed Lichess formula, and writes a text report.
+The current V2 architecture focuses on one question:
 
-This README is intentionally detailed so that another AI agent can enter the project and immediately understand the rules, assumptions, architecture, current implementation, and intended direction.
+> How much did the position change, from the perspective of the team that actually played the move?
 
-## 2. Game model
+The analyzer therefore evaluates the position before a move and the resulting position after that move. It does not compare an unrestricted root search against a separate `searchmoves` search for the played move.
 
-This is four-player team chess, not ordinary two-player chess.
+This separation is important because the accuracy calculation should describe the effect of the move that was actually played, while avoiding artifacts caused by comparing two searches with different root constraints or contaminated transposition-table state.
 
-The fixed move order is:
+## 2. Four-player game model
+
+The fixed turn order is:
 
 ```text
 Red -> Blue -> Yellow -> Green -> Red -> ...
@@ -27,77 +29,199 @@ Red -> Blue -> Yellow -> Green -> Red -> ...
 The teams are:
 
 ```text
-Blue + Green = BG
-Red + Yellow = RY
+RY = Red + Yellow
+BG = Blue + Green
 ```
 
 Therefore the strategic opposition is:
 
 ```text
-BG vs RY
+RY vs BG
 ```
 
-The engine always tracks the actual side to move. Do not replace the four-player turn sequence with a conventional white/black model.
+The analyzer always tracks the actual side to move. The four-player sequence must never be reduced to an ordinary White/Black alternation.
 
-### Critical score convention
+### Side-to-move score convention
 
-The engine's centipawn score is interpreted from the perspective of the current side to move, exactly as agreed for the engine integration.
-
-Therefore:
+Engine centipawn scores are interpreted from the current side-to-move perspective:
 
 ```text
-+100 CP = the current side to move is better by 100 CP
--100 CP = the current side to move is worse by 100 CP
++100 CP = current side to move is better by 100 CP
+-100 CP = current side to move is worse by 100 CP
 ```
 
-This remains true regardless of whether the current side belongs to RY or BG.
+This convention applies regardless of which team the current player belongs to.
 
-After a move is played, the side to move changes. Therefore an evaluation of the resulting position is initially from the next player's perspective and must be negated to obtain the mover's perspective.
+After a move, the side to move changes. Consequently, the engine's score for the resulting position is initially from the next player's perspective. To compare the resulting position with the position before the move, it must be converted back to the mover's perspective.
 
-For a normal CP evaluation:
+For example:
 
 ```text
-mover_score_before = before_score
-mover_score_after  = -after_score
+Before: +120 CP
+After:   -80 CP   # from the next player's perspective
+
+Mover-relative after score = +80 CP
+CP loss = 120 - 80 = 40 CP
 ```
 
-Then:
+The raw values `+120` and `-80` must not be subtracted directly. Doing so would produce a false 200 CP loss.
+
+## 3. Accuracy model
+
+V2 uses a transparent win-percentage-based accuracy model.
+
+First, a centipawn score is converted into an expected win percentage using a sigmoid function:
 
 ```text
-cp_loss = max(0, mover_score_before - mover_score_after)
+winPercent(cp) =
+    50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
 ```
 
-Do not compare the raw before and after scores without accounting for the side-to-move change.
+The score is capped at ±1000 CP for the numerical accuracy calculation.
 
-## 3. Search/evaluation philosophy
+For a move, the analyzer compares the win percentage of the mover-relative position before the move with the mover-relative position after the move.
 
-The project uses a team-search interpretation of negamax principles adapted to four-player team chess.
+If the resulting position is at least as good as the previous position for the mover's team, the move receives 100 accuracy.
 
-The analyzer itself does not force a fixed team perspective onto the engine. It relies on the engine's side-to-move-relative score semantics.
-
-Do not introduce a permanent `engine_team` setting into the analyzer unless the project requirements explicitly change. The intended V1 behavior is symmetric STM-relative evaluation.
-
-The analyzer should treat the engine as authoritative for the position evaluation and legal move interpretation. It should not attempt to implement a second chess rules engine in V1.
-
-## 4. Input
-
-V1 accepts exactly one PGN game as input.
-
-The expected source is a Chess.com 4PC PGN in the Teams format. Typical headers include fields such as:
+Otherwise, the win-percentage loss is passed through an exponential accuracy curve:
 
 ```text
-[GameNr "..."]
-[Variant "Teams"]
-[RuleVariants "..."]
-[StartFen4 "4PC"]
-[Red "..."]
-[Blue "..."]
-[Yellow "..."]
-[Green "..."]
-[Result "..."]
+winDiff = beforeWinPercent - afterWinPercent
+
+rawAccuracy =
+    103.1668100711649 * exp(-0.04354415386753951 * winDiff)
+    - 3.166924740191411
 ```
 
-The move list uses Chess.com 4PC notation such as:
+The final value includes a +1 uncertainty adjustment and is clamped to the range `[0, 100]`:
+
+```text
+accuracy = clamp(rawAccuracy + 1, 0, 100)
+```
+
+The constants are kept explicit in the implementation so the calculation is deterministic and testable.
+
+## 4. Position evaluation strategy
+
+The current analyzer evaluates the actual game line one position at a time.
+
+For a game containing `N` played moves, the analyzer performs:
+
+```text
+N + 1 position evaluations
+```
+
+The sequence is:
+
+```text
+Initial position
+      |
+      v
+Evaluate before position
+      |
+   play move
+      |
+      v
+Evaluate resulting position
+      |
+      v
+Use that result as the next before position
+      |
+   play next move
+      |
+     ...
+```
+
+This means the after-position evaluation for move `n` becomes the before-position evaluation for move `n + 1`.
+
+There is no second root-constrained search for the played move in V2.
+
+This architecture is intentionally simpler and more robust than the earlier same-root `searchmoves` comparison. It also matches the conceptual structure of a consecutive-position accuracy calculation.
+
+## 5. Team perspective conversion
+
+The engine score itself remains side-to-move relative. The analyzer performs the team-perspective conversion only when calculating the effect of a played move.
+
+Let:
+
+```text
+before = engine score before the move
+
+after  = engine score after the move
+```
+
+The before score is already from the mover's perspective because the mover is the side to move.
+
+The after score is from the next player's perspective. Therefore:
+
+```text
+moverAfter = -after
+```
+
+The move comparison is then:
+
+```text
+moverBefore
+moverAfter
+```
+
+For reporting and game-level aggregation, the implementation can retain a common team-relative score representation. Because the win-percentage transformation is symmetric around 50%, consistently negating the score for the opposite team is mathematically equivalent to changing the perspective.
+
+The important invariant is that every move is judged from the team that played that move.
+
+## 6. Mate handling
+
+Mate scores are retained separately from ordinary centipawn scores.
+
+For the current numerical accuracy model, a winning mate is treated as the positive extreme and a losing mate as the negative extreme:
+
+```text
+winning mate -> +1000 CP equivalent
+losing mate   -> -1000 CP equivalent
+```
+
+The original mate information is still preserved in the move analysis so the report does not lose the distinction between a normal CP evaluation and a mate score.
+
+This conversion is deliberately bounded. The analyzer does not attempt to assign arbitrary large centipawn values to different mate distances.
+
+Mate handling remains an area for future validation, particularly around transitions between normal evaluations and forced-mate states.
+
+## 7. Game-level aggregation
+
+Move accuracy alone does not provide a stable game-level measure. V2 therefore uses a volatility-aware aggregation model.
+
+The aggregation starts with a fixed initial RY-relative evaluation of `+15 CP`, followed by the RY-relative evaluation after each played move.
+
+The corresponding win percentages are divided into short overlapping windows. The window size is:
+
+```text
+windowSize = max(2, min(8, totalMoves // 10))
+```
+
+The initial window is repeated before the normal sliding windows so that the beginning of the game contributes to the volatility estimate.
+
+For each window, the weight is the standard deviation of its win percentages, clamped to:
+
+```text
+0.5 <= weight <= 12
+```
+
+The final game accuracy is the average of two components:
+
+```text
+50% volatility-weighted mean
+50% harmonic mean
+```
+
+The same underlying move-accuracy calculation is used for player and team summaries.
+
+This aggregation is an engineering choice for V2, not a claim that it is the unique or theoretically optimal measure of four-player chess performance. The raw move-level data remains available so the aggregation model can be changed independently later.
+
+## 8. Input format
+
+The analyzer accepts one four-player PGN game.
+
+The parser is designed around four-player PGN notation such as:
 
 ```text
 h2-h3
@@ -107,138 +231,13 @@ Ql5xQc5
 f2-f3+
 ```
 
-The parser must preserve the original notation for reporting while also producing the coordinate move expected by the UCI engine.
+The original notation is retained for reporting while a normalized UCI move is produced for the engine.
 
-The parser must support incomplete final rounds. A game can end after only one, two, or three moves of a four-move round.
+The parser also handles incomplete final rounds. A game may terminate after only one, two, or three moves of a four-move round.
 
-For example, this is valid:
+Termination markers such as `#` are treated as game notation, not as chess moves.
 
-```text
-7. Qg1xb6+ .. #
-```
-
-The lone `#` is a termination marker, not a chess move.
-
-## 5. Exact starting position
-
-V1 uses the known 4PC starting FEN supplied by the project/engine integration.
-
-It is stored in `config.py` as `START_FEN`. Do not silently replace it with a normal chess FEN.
-
-The analyzer reconstructs the game by sending the starting FEN followed by the normalized moves to the UCI engine.
-
-## 6. UCI requirements
-
-The target engine is a compatible four-player UCI engine. The analyzer must not depend on a particular engine brand or external engine link.
-
-The required UCI workflow is standard:
-
-```text
-uci
-setoption name Threads value N
-setoption name MultiPV value 3
-isready
-position fen <4PC FEN> moves <move1> <move2> ...
-go depth 20
-```
-
-The implementation waits for `uciok`, `readyok`, and `bestmove` and parses standard `info` lines.
-
-V1 defaults to:
-
-```text
-Depth   = 20
-MultiPV = 3
-Threads = 1
-```
-
-Threads are deliberately set to 1 initially because reproducibility and debugging are more important than maximum throughput in V1.
-
-The local executable path belongs in `config.py` or can be overridden with `--engine`. Do not document or hard-code a public engine name in this project documentation.
-
-## 7. Why MultiPV = 3
-
-MultiPV is not required for the mathematical accuracy calculation.
-
-The primary accuracy comparison is:
-
-```text
-best position evaluation before the move
-vs.
-played resulting-position evaluation after the move
-```
-
-MultiPV=3 is nevertheless useful because it allows V1 to identify whether the played move was among the engine's top three principal variations and, if so, report its rank.
-
-If the played move is not present in the top three, V1 reports the rank as unavailable. It must not invent a rank.
-
-Later versions may use larger MultiPV or a targeted search for the played move, but that is outside V1.
-
-## 8. Accuracy formula
-
-The project explicitly chose the Lichess accuracy formula for V1, even though it was designed around conventional two-player chess.
-
-This choice is intentional. Do not replace it merely because four-player chess has different game-theoretic properties. If unusual behavior appears, record it and investigate it empirically before changing the formula.
-
-For a normal centipawn score:
-
-```text
-winPercent(cp) = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
-```
-
-Then:
-
-```text
-accuracy = 103.1668 * exp(-0.04354 * (winPercentBefore - winPercentAfter)) - 3.1669
-```
-
-Finally clamp the result to:
-
-```text
-0 <= accuracy <= 100
-```
-
-For a move, `winPercentBefore` is computed from the best evaluation before the move, while `winPercentAfter` is computed from the played move's resulting evaluation after converting that evaluation back to the mover's perspective.
-
-The formula is therefore applied to the mover-relative pair:
-
-```text
-best_cp
-mover_after_cp
-```
-
-## 9. Mate handling
-
-Mate scores are fundamentally different from ordinary centipawn scores.
-
-V1 preserves mate information as a separate score type instead of blindly converting mate values into arbitrary CP numbers.
-
-If a before/after comparison crosses a mate state and a principled CP-equivalent comparison cannot be made, V1 reports the mate information but excludes that move from normal CP-loss/accuracy aggregation.
-
-This is deliberately conservative. Do not invent a mate-to-CP conversion without validating its effect on the accuracy metric.
-
-Mate handling is a future improvement area.
-
-## 10. What V1 calculates
-
-For every played move, V1 records:
-
-```text
-Ply
-Round
-Player
-Original move notation
-Normalized UCI move
-Best engine move
-Best CP / mate score
-Played resulting-position CP / mate score
-CP loss
-Accuracy
-MultiPV rank
-Search depth
-```
-
-The four players are assigned strictly by ply:
+Players are assigned strictly by ply:
 
 ```text
 ply 0 -> Red
@@ -249,317 +248,228 @@ ply 4 -> Red
 ...
 ```
 
-The round is:
+The round number is:
 
 ```text
 round = (ply // 4) + 1
 ```
 
-Thus one complete round consists of four moves.
+## 9. Starting position
 
-## 11. Aggregation
+The analyzer uses the exact four-player starting FEN configured in `config.py`.
 
-V1 reports per-player accuracy using the arithmetic mean of the valid per-move accuracies for that player.
+It must not be replaced with a normal chess starting FEN.
 
-Team accuracy is the arithmetic mean of the valid player/move accuracies belonging to that team.
+The position reconstruction is authoritative for the analysis pipeline: the engine receives the starting FEN followed by the normalized moves that lead to the position being evaluated.
 
-Therefore:
+## 10. UCI engine interface
 
-```text
-RY = Red + Yellow
-BG = Blue + Green
-```
+The analyzer communicates with a compatible four-player UCI engine using standard UCI commands.
 
-Mate-excluded moves do not contribute to the normal CP-based averages.
-
-This is a V1 aggregation decision, not a claim that this is the mathematically optimal four-player game accuracy aggregation.
-
-The raw move-level results must remain available so that aggregation can be changed later without redesigning the engine-analysis layer.
-
-## 12. What V1 does NOT attempt to reproduce
-
-Do not claim that this project reproduces Chess.com's proprietary accuracy number.
-
-Chess.com uses its own accuracy methodology, including its Expected Points / CAPS-based approach. The exact proprietary calculation is not the target of this V1.
-
-V1 instead uses the explicitly chosen Lichess formula because it is transparent and reproducible.
-
-There is also no universally accepted accuracy formula for chess variants or four-player chess. The project should therefore distinguish clearly between:
+The essential sequence is:
 
 ```text
-engine evaluation
-move CP loss
-Lichess-formula move accuracy
-player/team aggregation
+uci
+setoption name Threads value N
+isready
+position fen <4PC FEN> moves <move1> <move2> ...
+go depth N
 ```
 
-These are separate concepts.
+The implementation waits for the expected protocol responses, including `uciok`, `readyok`, and `bestmove`, and parses the engine's `info` output.
 
-## 13. Current architecture
+The current configuration is:
 
-The repository currently uses this structure:
+```text
+Depth   = 20
+Threads = 1
+MultiPV = 1
+```
+
+`MultiPV = 1` is used because V2 performs a single position evaluation rather than ranking several root moves.
+
+One engine thread is the default because deterministic debugging and reproducibility are more important than maximum throughput during development.
+
+The executable path is machine-specific and belongs in `config.py` or the command-line `--engine` override. It is intentionally not part of the project documentation.
+
+## 11. Repository structure
 
 ```text
 Variant-Accuracy-Finder/
 ├── main.py          # CLI entry point and orchestration
-├── png.py           # Chess.com 4PC PGN parser
-├── board.py         # Position/move-history state
-├── engine.py        # Public compatibility wrapper for UCI engine
-├── uci_engine.py    # Actual UCI process and info-line implementation
-├── analyzer.py      # Before/after analysis and move comparison
-├── report.py        # Accuracy calculations and TXT report generation
-├── config.py        # V1 constants and starting FEN
-├── README.md        # This project specification
-└── reports/         # Generated TXT reports
+├── png.py           # Four-player PGN parser
+├── board.py         # Position and move-history state
+├── engine.py        # Compatibility wrapper
+├── uci_engine.py    # UCI process management and score parsing
+├── analyzer.py      # Consecutive-position analysis and perspective conversion
+├── report.py        # Accuracy aggregation and TXT report generation
+├── config.py        # Configuration and starting FEN
+├── README.md        # Project documentation
+└── reports/         # Generated text reports
 ```
 
-The file name `png.py` is retained because it already existed in the project; its purpose is PGN parsing.
+The filename `png.py` is historical. Its actual purpose is PGN parsing.
 
-## 14. Current analysis algorithm
+## 12. Command-line usage
 
-For every move in the PGN:
-
-```text
-1. Start from the current position.
-2. Search the position at depth 20.
-3. Record MultiPV lines and the best line.
-4. Record the best move and best STM-relative score.
-5. Append the played move to a copied position state.
-6. Search the resulting position at depth 20.
-7. Record the resulting STM-relative score.
-8. Negate the resulting score to obtain mover-relative score.
-9. Calculate CP loss.
-10. Calculate Lichess accuracy.
-11. Determine MultiPV rank if the played move is in the top 3.
-12. Store the move result.
-13. Advance the real game state.
-```
-
-This means V1 intentionally performs two depth-20 searches per played move.
-
-That is expensive. It is nevertheless preferred initially because the implementation is easier to reason about and validate.
-
-Do not optimize this before correctness is established.
-
-## 15. Important implementation constraints
-
-Another agent modifying this project should preserve the following unless there is a demonstrated reason to change them:
-
-1. Four-player turn order is Red -> Blue -> Yellow -> Green.
-2. Teams are BG vs RY.
-3. Side to move is always tracked.
-4. Scores are always interpreted from the current side-to-move perspective.
-5. Post-move scores must be negated when converted back to the mover's perspective.
-6. The starting FEN must remain exact.
-7. Standard UCI commands should be used.
-8. V1 search depth is 20.
-9. V1 MultiPV is 3.
-10. V1 defaults to one engine thread for reproducibility.
-11. V1 uses the Lichess accuracy formula.
-12. Mate must not be converted to arbitrary CP values.
-13. Do not invent a MultiPV rank when the played move is outside the requested MultiPV set.
-14. Preserve raw move-level data.
-15. Output V1 is TXT.
-16. PGNs may have incomplete final rounds.
-17. Do not introduce a fixed engine-team perspective into the analyzer.
-18. Do not silently replace the four-player team model with ordinary two-player negamax assumptions.
-
-## 16. Current local usage
-
-The intended command-line form is:
+Basic usage:
 
 ```bash
 python main.py <path-to-pgn>
 ```
 
-or:
+Specify the engine explicitly:
 
 ```bash
 python main.py <path-to-pgn> --engine <path-to-uci-engine>
 ```
 
-Optional thread override:
+Override the thread count:
 
 ```bash
 python main.py <path-to-pgn> --engine <path-to-uci-engine> --threads 1
 ```
 
-The configured executable path is machine-specific and should not be copied into documentation or treated as a project-wide requirement.
-
-The report is written under:
+The generated report is written to:
 
 ```text
 reports/<GameNr>_report.txt
 ```
 
-## 17. Testing strategy
+## 13. Report contents
 
-The first priority is correctness, not speed.
+A V2 report contains the game and engine configuration followed by move-level analysis.
 
-When testing a new version, verify these independently.
-
-### PGN parsing
-
-Confirm that Red, Blue, Yellow, and Green are assigned to consecutive plies in exactly that order.
-
-Confirm that Chess.com notation is normalized correctly, including:
+Typical move-level fields include:
 
 ```text
-h2-h3      -> h2h3
-Bi1xc7     -> i1c7
-Qh14-d10   -> h14d10
-Ql5xQc5    -> l5c5
+Ply
+Round
+Player
+Played move
+Before score
+After score
+Mover-relative before score
+Mover-relative after score
+Accuracy
+Search depth
 ```
 
-Check promotions, captures, check markers, mate markers, comments, and incomplete final rounds.
+The report also provides player and team summaries.
 
-### Position sequence
+The raw engine scores and mover-relative scores are intentionally exposed so that numerical anomalies can be diagnosed rather than hidden behind a single accuracy number.
 
-For every ply, verify that the engine receives:
+## 14. Correctness invariants
+
+These invariants are more important than optimization:
+
+1. Turn order is always `Red -> Blue -> Yellow -> Green`.
+2. Teams are always `RY = Red + Yellow` and `BG = Blue + Green`.
+3. Side to move is tracked for every position.
+4. Engine scores are interpreted from the current side-to-move perspective.
+5. The score after a move is converted back to the mover's perspective before comparison.
+6. The exact configured starting FEN is preserved.
+7. The position sequence sent to the engine contains exactly the moves leading to the evaluated position.
+8. Every played move has a corresponding after-position evaluation unless the engine fails to provide a valid score.
+9. Accuracy is never calculated from raw before/after scores with mismatched perspectives.
+10. Mate information is not confused with ordinary centipawn scores.
+11. No move ranking is inferred when no ranking search was performed.
+12. Raw move-level results remain available independently of aggregation.
+
+## 15. Testing strategy
+
+Correctness should be established before performance optimization.
+
+PGN parsing should be tested for player assignment, move normalization, captures, promotions, check/mate markers, comments, and incomplete final rounds.
+
+Position reconstruction should be tested by verifying that every evaluated position contains exactly the expected prefix of the game move list.
+
+Score orientation should be tested explicitly. For example:
 
 ```text
-starting FEN + all moves before the position being evaluated
+Before = +120
+After  = -80
+
+Mover-after = +80
+CP loss = 40
 ```
 
-and that the played move itself is included for the after-position search.
+The test must reject the incorrect interpretation of this pair as a 200 CP loss.
 
-### Score orientation
+The accuracy transformation should be tested independently with fixed CP inputs and expected numerical outputs. The aggregation layer should likewise be tested independently from the UCI process.
 
-This is the most important numerical test.
-
-If before-search returns:
+Engine communication should verify:
 
 ```text
-+120
+uci      -> uciok
+isready  -> readyok
+go depth -> bestmove
 ```
 
-and after-search returns:
+Transposition-table behavior and repeated evaluations should also be tested when changes are made to the search interface. A numerical accuracy system should not be trusted merely because its output looks plausible.
+
+## 16. Known limitations
+
+The current implementation has several deliberate limitations:
+
+- The accuracy curve is adapted from a transparent two-player-style win-percentage model rather than being derived specifically from four-player game-theoretic data.
+- Mate transitions require further empirical validation.
+- The current search depth is fixed by configuration and can be computationally expensive.
+- Consecutive positions are evaluated independently at the UCI level; additional caching or search reuse may improve throughput later.
+- Game-level aggregation is an engineering model and requires calibration against large collections of human games before it should be treated as a definitive skill metric.
+- The analyzer depends on the target engine correctly supporting the four-player board, move format, and side-to-move score convention.
+
+These limitations should be treated as explicit engineering boundaries, not silently ignored.
+
+## 17. Development roadmap
+
+The recommended development order is:
 
 ```text
--80
-```
-
-then the mover-relative after score is:
-
-```text
-+80
-```
-
-and the CP loss is:
-
-```text
-120 - 80 = 40
-```
-
-It is NOT 200 CP.
-
-If before is `-50` and after is `-70`, then mover-after is `+70`, so the raw difference is negative and CP loss is clamped to zero.
-
-### Accuracy
-
-Test the Lichess formula independently with known CP pairs before trusting full-game output.
-
-### Engine communication
-
-Confirm:
-
-```text
-uci -> uciok
-isready -> readyok
-go depth 20 -> bestmove
-```
-
-and inspect actual `info` lines emitted by the local engine.
-
-## 18. Known V1 limitations
-
-V1 is deliberately incomplete in several areas:
-
-- It does not reproduce proprietary Chess.com CAPS2 accuracy.
-- It does not claim that Lichess accuracy is theoretically optimal for 4PC.
-- Mate transitions are not fully integrated into the numerical accuracy model.
-- MultiPV is only 3.
-- The played move's rank is unknown when it is outside the returned MultiPV set.
-- The analyzer performs two full depth-20 searches per move.
-- There is no caching/position reuse optimization yet.
-- There is no sophisticated game-level accuracy model yet.
-- Player/team aggregation is a simple arithmetic mean.
-- The implementation depends on the target engine correctly supporting the required 4PC UCI position and move format.
-
-These are known limitations, not bugs by themselves.
-
-## 19. Planned direction after V1
-
-The correct development order is:
-
-```text
-V1 correctness
+Correctness
     -> validate PGN reconstruction
     -> validate UCI position sequence
-    -> validate STM score orientation
-    -> validate accuracy math
+    -> validate score orientation
+    -> validate accuracy mathematics
+    -> validate aggregation
     -> validate reports
-    -> benchmark
-    -> optimize
-    -> improve mate handling
-    -> improve move ranking
-    -> investigate stronger accuracy models
+
+Performance
+    -> profile engine communication
+    -> measure repeated-position overhead
+    -> investigate safe caching/reuse
+    -> benchmark throughput
+
+Accuracy quality
+    -> validate mate transitions
+    -> calibrate win probability
+    -> evaluate alternative aggregation models
+    -> compare against large human-game datasets
+    -> investigate variant-specific expected-points models
 ```
 
-Potential future improvements include:
+Potential improvements should be justified by tests, measurements, or a clear theoretical argument. A more complicated method is not automatically a better method.
 
-- More efficient search reuse.
-- Transposition-aware analysis across consecutive positions.
-- Better handling of mate scores.
-- Larger or adaptive MultiPV.
-- Searching the played move directly when it is outside MultiPV.
-- Better game-level and team-level aggregation.
-- Variant-specific expected-points or win-probability models.
-- Calibration against large collections of human games.
-- Performance profiling and parallel analysis after correctness is proven.
-- Additional output formats after the TXT format is stable.
+## 18. Engineering principles
 
-Do not implement these simply because they sound stronger. Each should be justified with tests or measurable benefit.
+This project is an experimental accuracy-analysis system, so changes should be evaluated as hypotheses rather than assumptions.
 
-## 20. Engineering philosophy for future AI agents
+For every proposed modification:
 
-This project is being developed as an experimental engine-analysis system, so an AI agent working on it must challenge assumptions instead of automatically agreeing with them.
+1. State the assumption it depends on.
+2. Identify plausible counterexamples.
+3. Check the logic against the four-player turn order and team model.
+4. Test score orientation explicitly.
+5. Separate engine behavior from analyzer behavior.
+6. Measure the effect before declaring an optimization successful.
+7. Preserve diagnostic data whenever possible.
 
-For every proposed change:
+In particular, an output that appears reasonable is not evidence that the underlying evaluation is correct. Search artifacts, perspective errors, transposition-table contamination, and aggregation mistakes can all produce plausible-looking numbers.
 
-1. Identify what assumption the change relies on.
-2. Consider what could make that assumption false.
-3. Test the logic against the four-player turn order and team model.
-4. Check whether score orientation changes anywhere in the pipeline.
-5. Distinguish a real correctness issue from a performance issue or a metric-design choice.
-6. Prefer evidence from tests, engine output, and reproducible examples over intuition.
-7. Do not silently change agreed semantics.
-8. If the current design is wrong, say so explicitly and explain the failure mode.
+## 19. Design principle
 
-The project should evolve from a known-correct baseline rather than from a collection of unvalidated optimizations.
+The central principle of Variant Accuracy Finder is:
 
-## 21. Current status
+> The accuracy score should describe the effect of the move that was actually played, from the perspective of the team that played it.
 
-V1 source files have been created and implemented in the `main` branch.
-
-The first local execution should be treated as an integration test. The expected initial debugging targets are:
-
-```text
-PGN parsing
--> engine process startup
--> UCI handshake
--> 4PC position command
--> 4PC move sequence
--> depth-20 info parsing
--> score orientation
--> accuracy calculation
--> TXT report
-```
-
-Do not assume the analyzer is numerically trustworthy merely because it starts successfully. The first complete game should be manually checked at several plies before using its accuracy numbers for comparisons.
-
-## 22. Project objective
-
-The long-term objective is a reliable, transparent, variant-aware accuracy analyzer for four-player team chess.
-
-V1 is the baseline. The immediate goal is not to produce a sophisticated metric; it is to establish a correct data and evaluation pipeline on which stronger metrics can be built without losing the ability to audit individual moves.
+Everything else in the analyzer — position reconstruction, side-to-move handling, score conversion, accuracy mathematics, and aggregation — exists to make that statement precise, reproducible, and testable.
