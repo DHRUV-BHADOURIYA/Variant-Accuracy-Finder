@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 from analyzer import analyze_game
-from config import ANALYSIS_DEPTH, ENGINE_THREADS, ENGINE_PATH, MULTI_PV, REPORT_DIRECTORY
+from config import ANALYSIS_DEPTH, ENGINE_THREADS, ENGINE_PATH, REPORT_DIRECTORY
 from png import parse_pgn
 from report import generate_report, save_report
 from uci_engine import UCIEngine
@@ -42,14 +42,14 @@ def main() -> None:
     print(f"Moves: {len(game.moves)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
-    print(f"MultiPV: {MULTI_PV}")
+    print("MultiPV: 1 (single-PV accuracy evaluation)")
     print(f"Threads: {args.threads}")
     print()
 
     with UCIEngine(
         engine_path=args.engine,
         threads=args.threads,
-        multipv=MULTI_PV,
+        multipv=1,
     ) as engine:
         analyses = analyze_game(game, engine)
 
