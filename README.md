@@ -2,7 +2,7 @@
 
 V1 specification and project context for a four-player team-chess accuracy analyzer.
 
-Maintainer / developer: Dhruv
+Maintainer / developer: Dhruv Aka Captain-Bolt
 
 ## 1. What this project is
 
