@@ -22,7 +22,7 @@ def win_percent(cp: float) -> float:
 
 
 def lichess_accuracy(before_cp: float, after_cp: float) -> float:
-    """Lichess move accuracy formula, clamped to [0, 100]."""
+    """Lichess move-accuracy formula, clamped to [0, 100]."""
     before = win_percent(before_cp)
     after = win_percent(after_cp)
     value = 103.1668 * math.exp(-0.04354 * (before - after)) - 3.1669
@@ -50,8 +50,8 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     names = _player_names(headers)
 
     lines: list[str] = []
-    lines.append("4PC VARIANT ACCURACY FINDER — V1.1")
-    lines.append("=" * 72)
+    lines.append("4PC VARIANT ACCURACY FINDER — V1.2")
+    lines.append("=" * 76)
     lines.append(f"Game:       {headers.get('GameNr', 'Unknown')}")
     lines.append(f"Variant:    {headers.get('Variant', 'Unknown')}")
     lines.append(f"Result:     {headers.get('Result', 'Unknown')}")
@@ -63,9 +63,10 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("")
     lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
     lines.append("Accuracy: Lichess move-accuracy formula applied to STM-relative CP.")
-    lines.append("Score convention: every raw engine score is from the current STM perspective.")
+    lines.append("Evaluation: single-PV (MultiPV=1) at the configured fixed depth.")
+    lines.append("Score convention: raw engine score is from the current STM perspective.")
     lines.append("After a move, MoverAfterCP is the negated score of the resulting position.")
-    lines.append("Mate transitions are reported but excluded from CP-loss/accuracy averages in V1.1.")
+    lines.append("Mate transitions are reported but excluded from CP-loss/accuracy averages.")
     lines.append("")
 
     by_player: dict[str, list[float]] = {p: [] for p in TEAM}
@@ -76,7 +77,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
             by_team[TEAM[item.move.player]].append(item.accuracy)
 
     lines.append("SUMMARY")
-    lines.append("-" * 72)
+    lines.append("-" * 76)
     for color in ("Red", "Blue", "Yellow", "Green"):
         scores = by_player[color]
         avg = mean(scores) if scores else None
@@ -88,9 +89,9 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
 
     lines.append("")
     lines.append("MOVE-BY-MOVE")
-    lines.append("-" * 72)
+    lines.append("-" * 76)
     lines.append(
-        "Ply Rd Player       Played       Best         BestCP AfterCP MoverCP Loss   Acc    Rank"
+        "Ply Rd Player       Played       Best         BestCP AfterCP MoverCP Loss   Acc"
     )
 
     for item in analyses:
@@ -105,23 +106,20 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
             f"{_fmt_score(item.after_cp, item.after_mate):>7} "
             f"{_fmt_score(item.mover_after_cp, None):>7} "
             f"{_fmt_float(item.cp_loss, 1):>5} "
-            f"{_fmt_float(item.accuracy):>6} "
-            f"{item.rank if item.rank is not None else 'N/A':>4}{marker}"
+            f"{_fmt_float(item.accuracy):>6}{marker}"
         )
 
     anomalies = [item for item in analyses if item.score_anomaly]
     if anomalies:
         lines.append("")
         lines.append("SEARCH INVARIANT WARNINGS")
-        lines.append("-" * 72)
+        lines.append("-" * 76)
         for item in anomalies:
             lines.append(
                 f"Ply {item.move.ply + 1}: played move {item.move.uci} has "
                 f"MoverAfterCP {item.mover_after_cp:+d}, above root BestCP {item.best_cp:+d}."
             )
-            lines.append(
-                "  This is not silently treated as negative loss; inspect the engine/search pipeline."
-            )
+            lines.append("  Inspect the engine/search pipeline; no negative loss is fabricated.")
 
     lines.append("")
     lines.append("Notes")
@@ -129,10 +127,9 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("- AfterCP is the raw score after the played move, from the next player's STM perspective.")
     lines.append("- MoverAfterCP = -AfterCP for normal CP scores.")
     lines.append("- CP loss = max(0, BestCP - MoverAfterCP).")
-    lines.append("- Rank is based on the MultiPV lines; V1.1 uses MultiPV=3.")
-    lines.append("- If the played move is outside MultiPV=3, rank is N/A rather than guessed.")
-    lines.append("- Best uses the engine's UCI bestmove when available; PV[0] is the fallback.")
+    lines.append("- The engine's UCI bestmove is used as Best; PV[0] is only a fallback.")
     lines.append("- Player/team averages are arithmetic means of eligible move accuracies.")
+    lines.append("- MultiPV is intentionally disabled in V1.2; move ranking is not part of accuracy.")
 
     return "\n".join(lines)
 
