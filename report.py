@@ -50,8 +50,8 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     names = _player_names(headers)
 
     lines: list[str] = []
-    lines.append("4PC VARIANT ACCURACY FINDER — V1")
-    lines.append("=" * 60)
+    lines.append("4PC VARIANT ACCURACY FINDER — V1.1")
+    lines.append("=" * 72)
     lines.append(f"Game:       {headers.get('GameNr', 'Unknown')}")
     lines.append(f"Variant:    {headers.get('Variant', 'Unknown')}")
     lines.append(f"Result:     {headers.get('Result', 'Unknown')}")
@@ -63,7 +63,9 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("")
     lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
     lines.append("Accuracy: Lichess move-accuracy formula applied to STM-relative CP.")
-    lines.append("Mate transitions are reported but excluded from CP-loss/accuracy averages in V1.")
+    lines.append("Score convention: every raw engine score is from the current STM perspective.")
+    lines.append("After a move, MoverAfterCP is the negated score of the resulting position.")
+    lines.append("Mate transitions are reported but excluded from CP-loss/accuracy averages in V1.1.")
     lines.append("")
 
     by_player: dict[str, list[float]] = {p: [] for p in TEAM}
@@ -74,7 +76,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
             by_team[TEAM[item.move.player]].append(item.accuracy)
 
     lines.append("SUMMARY")
-    lines.append("-" * 60)
+    lines.append("-" * 72)
     for color in ("Red", "Blue", "Yellow", "Green"):
         scores = by_player[color]
         avg = mean(scores) if scores else None
@@ -86,31 +88,50 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
 
     lines.append("")
     lines.append("MOVE-BY-MOVE")
-    lines.append("-" * 60)
+    lines.append("-" * 72)
     lines.append(
-        "Ply  Rd  Player       Played       Best         BestCP  PlayedCP  Loss    Acc    Rank"
+        "Ply Rd Player       Played       Best         BestCP AfterCP MoverCP Loss   Acc    Rank"
     )
 
     for item in analyses:
+        marker = " !" if item.score_anomaly else ""
         lines.append(
-            f"{item.move.ply + 1:>3}  "
-            f"{item.move.round_number:>2}  "
+            f"{item.move.ply + 1:>3} "
+            f"{item.move.round_number:>2} "
             f"{item.move.player:<11} "
             f"{item.move.notation:<12} "
             f"{(item.best_move or 'N/A'):<12} "
-            f"{_fmt_score(item.best_cp, item.best_mate):>7}  "
-            f"{_fmt_score(item.played_cp, item.played_mate):>8}  "
-            f"{_fmt_float(item.cp_loss, 1):>5}  "
-            f"{_fmt_float(item.accuracy):>5}  "
-            f"{item.rank if item.rank is not None else 'N/A':>4}"
+            f"{_fmt_score(item.best_cp, item.best_mate):>6} "
+            f"{_fmt_score(item.after_cp, item.after_mate):>7} "
+            f"{_fmt_score(item.mover_after_cp, None):>7} "
+            f"{_fmt_float(item.cp_loss, 1):>5} "
+            f"{_fmt_float(item.accuracy):>6} "
+            f"{item.rank if item.rank is not None else 'N/A':>4}{marker}"
         )
+
+    anomalies = [item for item in analyses if item.score_anomaly]
+    if anomalies:
+        lines.append("")
+        lines.append("SEARCH INVARIANT WARNINGS")
+        lines.append("-" * 72)
+        for item in anomalies:
+            lines.append(
+                f"Ply {item.move.ply + 1}: played move {item.move.uci} has "
+                f"MoverAfterCP {item.mover_after_cp:+d}, above root BestCP {item.best_cp:+d}."
+            )
+            lines.append(
+                "  This is not silently treated as negative loss; inspect the engine/search pipeline."
+            )
 
     lines.append("")
     lines.append("Notes")
-    lines.append("- Positive CP is always from the engine's current side-to-move perspective.")
-    lines.append("- For a played move, the post-move score is negated because STM changes to the next player.")
-    lines.append("- Rank is based on the MultiPV lines returned by the engine; V1 uses MultiPV=3.")
+    lines.append("- BestCP is the root score before the move, from the mover's STM perspective.")
+    lines.append("- AfterCP is the raw score after the played move, from the next player's STM perspective.")
+    lines.append("- MoverAfterCP = -AfterCP for normal CP scores.")
+    lines.append("- CP loss = max(0, BestCP - MoverAfterCP).")
+    lines.append("- Rank is based on the MultiPV lines; V1.1 uses MultiPV=3.")
     lines.append("- If the played move is outside MultiPV=3, rank is N/A rather than guessed.")
+    lines.append("- Best uses the engine's UCI bestmove when available; PV[0] is the fallback.")
     lines.append("- Player/team averages are arithmetic means of eligible move accuracies.")
 
     return "\n".join(lines)
