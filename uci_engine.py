@@ -91,6 +91,12 @@ class UCIEngine:
             if self._readline().strip() == expected:
                 return
 
+    def clear_hash(self) -> None:
+        """Clear the engine transposition table before an independent search."""
+        self._send("setoption name Clear Hash")
+        self._send("isready")
+        self._wait_for("readyok")
+
     @staticmethod
     def _parse_info(line: str) -> EngineLine | None:
         parts = line.split()
@@ -170,11 +176,7 @@ class UCIEngine:
         depth: int,
         searchmoves: list[str] | None = None,
     ) -> SearchResult:
-        """Analyze a position, optionally restricting the root to searchmoves.
-
-        The engine requires UCI's depth token to precede searchmoves, so the
-        command is deliberately emitted as: go depth N searchmoves ...
-        """
+        """Analyze a position, optionally restricting the root to searchmoves."""
         move_text = " ".join(moves)
         command = f"position fen {fen}"
         if move_text:
