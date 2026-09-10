@@ -37,13 +37,14 @@ def main() -> None:
     if not game.moves:
         raise ValueError("No 4PC moves were found in the PGN")
 
-    print("4PC Variant Accuracy Finder")
+    print("4PC Variant Accuracy Finder — V1.3")
     print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
     print(f"Moves: {len(game.moves)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
     print("MultiPV: 1 (single-PV accuracy evaluation)")
     print(f"Threads: {args.threads}")
+    print("Scoring: same-root unrestricted vs played-move-restricted search")
     print()
 
     with UCIEngine(
