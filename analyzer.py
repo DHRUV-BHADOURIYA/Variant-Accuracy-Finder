@@ -36,9 +36,12 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
     for index, move in enumerate(game.moves):
         print(f"Analyzing ply {index + 1}/{len(game.moves)}: {move.notation}")
 
-        # 1. Find the engine's best move and exact root score from the current
-        # position. MultiPV is intentionally 1 for the accuracy calculation.
-        before_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
+        # Search the best move from the current root.
+        before_result = engine.analyze(
+            state.fen,
+            state.uci_moves(),
+            ANALYSIS_DEPTH,
+        )
         best_line = before_result.lines.get(1)
         best_cp, best_mate = _score(best_line)
         engine_bestmove = before_result.bestmove
@@ -46,8 +49,12 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
         if best_move is None and best_line and best_line.pv:
             best_move = best_line.pv[0]
 
-        # 2. Evaluate the ACTUAL played move from the exact same root position.
-        # This avoids the unstable root-vs-child comparison that V1.2 used.
+        # Clear the hash before the second measurement. The played-move score
+        # must not inherit TT entries produced by the unrestricted search.
+        engine.clear_hash()
+
+        # Evaluate the actual played move from the exact same root position
+        # with an independent transposition-table state.
         played_result = engine.analyze(
             state.fen,
             state.uci_moves(),
@@ -64,9 +71,6 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
             from report import lichess_accuracy
             accuracy = lichess_accuracy(best_cp, played_cp)
 
-        # A root-restricted score should never exceed the unrestricted root
-        # score at the same depth. If it does, flag the search result rather
-        # than hiding the inconsistency behind max(0, loss).
         score_anomaly = (
             best_cp is not None
             and played_cp is not None
