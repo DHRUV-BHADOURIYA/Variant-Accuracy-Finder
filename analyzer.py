@@ -13,9 +13,8 @@ class MoveAnalysis:
     move: ParsedMove
     best_cp: int | None
     best_mate: int | None
-    after_cp: int | None
-    after_mate: int | None
-    mover_after_cp: int | None
+    played_cp: int | None
+    played_mate: int | None
     cp_loss: float | None
     accuracy: float | None
     best_move: str | None
@@ -25,16 +24,9 @@ class MoveAnalysis:
 
 
 def _score(line: EngineLine | None) -> tuple[int | None, int | None]:
-    if line is None:
+    if line is None or not line.is_exact:
         return None, None
     return line.score_cp, line.mate
-
-
-def _mover_perspective_after(line: EngineLine | None) -> int | None:
-    """Convert resulting-position CP from next STM to the mover perspective."""
-    if line is None or line.score_cp is None or line.mate is not None:
-        return None
-    return -line.score_cp
 
 
 def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
@@ -44,8 +36,8 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
     for index, move in enumerate(game.moves):
         print(f"Analyzing ply {index + 1}/{len(game.moves)}: {move.notation}")
 
-        # Search the position before the played move. MultiPV is intentionally
-        # not used: the single-PV root result is authoritative for accuracy.
+        # 1. Find the engine's best move and exact root score from the current
+        # position. MultiPV is intentionally 1 for the accuracy calculation.
         before_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
         best_line = before_result.lines.get(1)
         best_cp, best_mate = _score(best_line)
@@ -54,26 +46,31 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
         if best_move is None and best_line and best_line.pv:
             best_move = best_line.pv[0]
 
-        # Search the actual resulting position with the same single-PV setup.
-        after_state = state.copy_with_move(move)
-        after_result = engine.analyze(after_state.fen, after_state.uci_moves(), ANALYSIS_DEPTH)
-        played_line = after_result.lines.get(1)
-        after_cp, after_mate = _score(played_line)
+        # 2. Evaluate the ACTUAL played move from the exact same root position.
+        # This avoids the unstable root-vs-child comparison that V1.2 used.
+        played_result = engine.analyze(
+            state.fen,
+            state.uci_moves(),
+            ANALYSIS_DEPTH,
+            searchmoves=[move.uci],
+        )
+        played_line = played_result.lines.get(1)
+        played_cp, played_mate = _score(played_line)
 
-        mover_after_cp = _mover_perspective_after(played_line)
         cp_loss: float | None = None
         accuracy: float | None = None
-        if best_cp is not None and mover_after_cp is not None:
-            cp_loss = max(0.0, float(best_cp - mover_after_cp))
+        if best_cp is not None and played_cp is not None:
+            cp_loss = max(0.0, float(best_cp - played_cp))
             from report import lichess_accuracy
-            accuracy = lichess_accuracy(best_cp, mover_after_cp)
+            accuracy = lichess_accuracy(best_cp, played_cp)
 
-        # This should normally be impossible for a consistent search result.
-        # Keep the warning rather than manufacturing a negative loss.
+        # A root-restricted score should never exceed the unrestricted root
+        # score at the same depth. If it does, flag the search result rather
+        # than hiding the inconsistency behind max(0, loss).
         score_anomaly = (
             best_cp is not None
-            and mover_after_cp is not None
-            and mover_after_cp > best_cp
+            and played_cp is not None
+            and played_cp > best_cp
         )
 
         results.append(
@@ -81,9 +78,8 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
                 move=move,
                 best_cp=best_cp,
                 best_mate=best_mate,
-                after_cp=after_cp,
-                after_mate=after_mate,
-                mover_after_cp=mover_after_cp,
+                played_cp=played_cp,
+                played_mate=played_mate,
                 cp_loss=cp_loss,
                 accuracy=accuracy,
                 best_move=best_move,
