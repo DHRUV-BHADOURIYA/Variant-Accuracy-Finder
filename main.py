@@ -3,23 +3,20 @@ from pathlib import Path
 
 from analyzer import analyze_game
 from config import ANALYSIS_DEPTH, ENGINE_THREADS, ENGINE_PATH, MULTI_PV, REPORT_DIRECTORY
-from pgn_parser import parse_pgn
+from png import parse_pgn
 from report import generate_report, save_report
 from uci_engine import UCIEngine
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze one Chess.com 4PC game and produce a text accuracy report."
+        description="Analyze one Chess.com 4PC PGN file and produce a text accuracy report."
     )
-    parser.add_argument(
-        "pgn",
-        help="Path to one Chess.com 4PC PGN file",
-    )
+    parser.add_argument("pgn", help="Path to one Chess.com 4PC PGN file")
     parser.add_argument(
         "--engine",
         default=str(ENGINE_PATH),
-        help="Path to the 4PC UCI engine executable (default: cli)",
+        help=f"Path to the 4PC UCI engine executable (default: {ENGINE_PATH})",
     )
     parser.add_argument(
         "--threads",
@@ -29,11 +26,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
+
     pgn_path = Path(args.pgn)
     if not pgn_path.is_file():
         raise FileNotFoundError(f"PGN file not found: {pgn_path}")
 
     game = parse_pgn(pgn_path)
+    if not game.moves:
+        raise ValueError("No 4PC moves were found in the PGN")
 
     print("4PC Variant Accuracy Finder")
     print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
