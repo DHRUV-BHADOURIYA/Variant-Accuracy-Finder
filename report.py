@@ -50,7 +50,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     names = _player_names(headers)
 
     lines: list[str] = []
-    lines.append("4PC VARIANT ACCURACY FINDER — V1.2")
+    lines.append("4PC VARIANT ACCURACY FINDER — V1.3")
     lines.append("=" * 76)
     lines.append(f"Game:       {headers.get('GameNr', 'Unknown')}")
     lines.append(f"Variant:    {headers.get('Variant', 'Unknown')}")
@@ -64,8 +64,9 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
     lines.append("Accuracy: Lichess move-accuracy formula applied to STM-relative CP.")
     lines.append("Evaluation: single-PV (MultiPV=1) at the configured fixed depth.")
-    lines.append("Score convention: raw engine score is from the current STM perspective.")
-    lines.append("After a move, MoverAfterCP is the negated score of the resulting position.")
+    lines.append("Scoring: best move and played move are evaluated from the SAME root position.")
+    lines.append("PlayedCP is the root score when search is restricted to the played move.")
+    lines.append("CP loss = max(0, BestCP - PlayedCP). No child-position negation is used.")
     lines.append("Mate transitions are reported but excluded from CP-loss/accuracy averages.")
     lines.append("")
 
@@ -91,7 +92,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("MOVE-BY-MOVE")
     lines.append("-" * 76)
     lines.append(
-        "Ply Rd Player       Played       Best         BestCP AfterCP MoverCP Loss   Acc"
+        "Ply Rd Player       Played       Best         BestCP PlayedCP Loss   Acc"
     )
 
     for item in analyses:
@@ -103,8 +104,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
             f"{item.move.notation:<12} "
             f"{(item.best_move or 'N/A'):<12} "
             f"{_fmt_score(item.best_cp, item.best_mate):>6} "
-            f"{_fmt_score(item.after_cp, item.after_mate):>7} "
-            f"{_fmt_score(item.mover_after_cp, None):>7} "
+            f"{_fmt_score(item.played_cp, item.played_mate):>8} "
             f"{_fmt_float(item.cp_loss, 1):>5} "
             f"{_fmt_float(item.accuracy):>6}{marker}"
         )
@@ -116,20 +116,21 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
         lines.append("-" * 76)
         for item in anomalies:
             lines.append(
-                f"Ply {item.move.ply + 1}: played move {item.move.uci} has "
-                f"MoverAfterCP {item.mover_after_cp:+d}, above root BestCP {item.best_cp:+d}."
+                f"Ply {item.move.ply + 1}: restricted played-move score "
+                f"{item.played_cp:+d} exceeds unrestricted root BestCP {item.best_cp:+d}."
             )
-            lines.append("  Inspect the engine/search pipeline; no negative loss is fabricated.")
+            lines.append("  Inspect engine/search bounds or root-search consistency.")
 
     lines.append("")
     lines.append("Notes")
-    lines.append("- BestCP is the root score before the move, from the mover's STM perspective.")
-    lines.append("- AfterCP is the raw score after the played move, from the next player's STM perspective.")
-    lines.append("- MoverAfterCP = -AfterCP for normal CP scores.")
-    lines.append("- CP loss = max(0, BestCP - MoverAfterCP).")
+    lines.append("- BestCP is the unrestricted root score before the move, from the mover's STM perspective.")
+    lines.append("- PlayedCP is the score from the same root with searchmoves restricted to the played move.")
+    lines.append("- CP loss = max(0, BestCP - PlayedCP).")
+    lines.append("- This V1.3 method avoids comparing an independently searched child position with the root.")
     lines.append("- The engine's UCI bestmove is used as Best; PV[0] is only a fallback.")
+    lines.append("- Bound scores are not treated as exact scores for accuracy calculations.")
     lines.append("- Player/team averages are arithmetic means of eligible move accuracies.")
-    lines.append("- MultiPV is intentionally disabled in V1.2; move ranking is not part of accuracy.")
+    lines.append("- MultiPV is intentionally disabled in V1.3; move ranking is not part of accuracy.")
 
     return "\n".join(lines)
 
