@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 from analyzer import analyze_game
-from config import ANALYSIS_DEPTH, ENGINE_THREADS, ENGINE_PATH, REPORT_DIRECTORY
+from config import ANALYSIS_DEPTH, ENGINE_MULTIPV, ENGINE_THREADS, ENGINE_PATH, REPORT_DIRECTORY
 from png import parse_pgn
 from report import generate_report, save_report
 from uci_engine import UCIEngine
@@ -10,7 +10,7 @@ from uci_engine import UCIEngine
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze one Chess.com 4PC PGN file and produce a Lichess-style accuracy report."
+        description="Analyze one Chess.com 4PC PGN file and produce a 4PC accuracy and fair-play feature report."
     )
     parser.add_argument("pgn", help="Path to one Chess.com 4PC PGN file")
     parser.add_argument(
@@ -37,12 +37,12 @@ def main() -> None:
     if not game.moves:
         raise ValueError("No 4PC moves were found in the PGN")
 
-    print("4PC Variant Accuracy Finder — V2.0")
+    print("4PC Variant Accuracy Finder — V2.1")
     print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
     print(f"Moves: {len(game.moves)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
-    print("MultiPV: 1 (single-PV position evaluation)")
+    print(f"MultiPV: {ENGINE_MULTIPV} (move agreement + criticality)")
     print(f"Threads: {args.threads}")
     print("Scoring: Lichess-style before/after position evaluation")
     print("Perspective: moving player's team (RY vs BG)")
@@ -51,7 +51,7 @@ def main() -> None:
     with UCIEngine(
         engine_path=args.engine,
         threads=args.threads,
-        multipv=1,
+        multipv=ENGINE_MULTIPV,
     ) as engine:
         analyses = analyze_game(game, engine)
 
