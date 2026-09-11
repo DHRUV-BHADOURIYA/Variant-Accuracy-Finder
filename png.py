@@ -7,6 +7,16 @@ from pathlib import Path
 
 PLAYERS = ("Red", "Blue", "Yellow", "Green")
 
+# Chess.com 4PC Teams castling is represented in the engine by the king's
+# actual two-square move. The mapping is player-specific because each player
+# starts on a different board edge.
+CASTLING_UCI = {
+    "Red": {"O-O": "h1j1", "O-O-O": "h1f1"},
+    "Blue": {"O-O": "a7a5", "O-O-O": "a7a9"},
+    "Yellow": {"O-O": "g14e14", "O-O-O": "g14i14"},
+    "Green": {"O-O": "n8n10", "O-O-O": "n8n6"},
+}
+
 
 @dataclass(frozen=True)
 class ParsedMove:
@@ -40,10 +50,20 @@ def _strip_noise(text: str) -> str:
     return text
 
 
-def _normalize_move(token: str) -> str | None:
+def _normalize_move(token: str, player: str | None = None) -> str | None:
     token = token.strip()
     if not token or token in {"...", "#", "++"}:
         return None
+
+    # Castling is legal notation in Chess.com 4PC PGNs and has no coordinates
+    # for _COORD_RE to extract. It must be normalized before coordinate parsing.
+    castle = token.upper()
+    castle = re.sub(r"[+#]+$", "", castle)
+    if castle in {"O-O", "0-0", "O-O-O", "0-0-0"}:
+        if player is None:
+            return None
+        castle = castle.replace("0", "O")
+        return CASTLING_UCI[player].get(castle)
 
     token = re.sub(r"[+#]+$", "", token)
 
@@ -84,11 +104,11 @@ def parse_pgn_text(text: str) -> Game:
         # A lone '#' is the termination marker, not a move.
         if token in {"#", "++", "..."}:
             continue
-        uci = _normalize_move(token)
+        player = PLAYERS[ply % 4]
+        uci = _normalize_move(token, player)
         if uci is None:
             continue
 
-        player = PLAYERS[ply % 4]
         moves.append(
             ParsedMove(
                 ply=ply,
