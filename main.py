@@ -8,11 +8,44 @@ from report import generate_report, save_report
 from uci_engine import UCIEngine
 
 
+def _collect_pgn_files(input_path: Path) -> list[Path]:
+    """Return PGN/text files to analyze, in deterministic order."""
+    if input_path.is_file():
+        return [input_path]
+
+    if input_path.is_dir():
+        # Chess.com 4PC exports in this project commonly use .pgn4.txt.
+        # Accept .pgn, .pgn4 and .txt so the folder can contain mixed exports.
+        files = [
+            p
+            for p in input_path.iterdir()
+            if p.is_file() and p.suffix.lower() in {".pgn", ".pgn4", ".txt"}
+        ]
+        return sorted(files, key=lambda p: p.name.lower())
+
+    raise FileNotFoundError(f"Input path not found: {input_path}")
+
+
+def _report_path(game, source_path: Path) -> Path:
+    """Choose a stable report filename, preferring the game number."""
+    game_number = str(game.headers.get("GameNr", "")).strip()
+    stem = game_number or source_path.stem
+    return REPORT_DIRECTORY / f"{stem}_report.txt"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze one Chess.com 4PC PGN file and produce a 4PC accuracy and fair-play feature report."
+        description=(
+            "Analyze one Chess.com 4PC PGN file or every supported PGN/text file "
+            "inside a folder and produce a report for each game."
+        )
     )
-    parser.add_argument("pgn", help="Path to one Chess.com 4PC PGN file")
+    parser.add_argument(
+        "input_path",
+        nargs="?",
+        default="png",
+        help="Path to one PGN file or a folder containing PGN/text files (default: png)",
+    )
     parser.add_argument(
         "--engine",
         default=str(ENGINE_PATH),
@@ -29,17 +62,16 @@ def main() -> None:
     if args.threads < 1:
         parser.error("--threads must be at least 1")
 
-    pgn_path = Path(args.pgn)
-    if not pgn_path.is_file():
-        raise FileNotFoundError(f"PGN file not found: {pgn_path}")
+    input_path = Path(args.input_path)
+    pgn_files = _collect_pgn_files(input_path)
+    if not pgn_files:
+        raise FileNotFoundError(f"No supported PGN/text files found in: {input_path}")
 
-    game = parse_pgn(pgn_path)
-    if not game.moves:
-        raise ValueError("No 4PC moves were found in the PGN")
+    REPORT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
     print("4PC Variant Accuracy Finder — V2.2")
-    print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
-    print(f"Moves: {len(game.moves)}")
+    print(f"Input: {input_path}")
+    print(f"Games/files found: {len(pgn_files)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
     print(f"MultiPV requested: {ENGINE_MULTIPV}")
@@ -48,6 +80,11 @@ def main() -> None:
     print("Perspective: moving player's team (RY vs BG)")
     print()
 
+    completed = 0
+    failed = 0
+
+    # Keep one Stockfish process alive for the entire batch. This avoids
+    # repeatedly starting/stopping the engine between games.
     with UCIEngine(
         engine_path=args.engine,
         threads=args.threads,
@@ -59,17 +96,39 @@ def main() -> None:
         else:
             print("MultiPV features: disabled; core V2 accuracy remains enabled")
         print()
-        analyses = analyze_game(game, engine)
 
-    report = generate_report(game, analyses)
+        for index, pgn_path in enumerate(pgn_files, start=1):
+            print("=" * 72)
+            print(f"GAME {index}/{len(pgn_files)}: {pgn_path.name}")
 
-    game_number = game.headers.get("GameNr", pgn_path.stem)
-    output_path = REPORT_DIRECTORY / f"{game_number}_report.txt"
-    save_report(report, output_path)
+            try:
+                game = parse_pgn(pgn_path)
+                if not game.moves:
+                    raise ValueError("No 4PC moves were found in the PGN")
 
-    print(report)
-    print()
-    print(f"Report saved to: {output_path}")
+                print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
+                print(f"Moves: {len(game.moves)}")
+                print()
+
+                analyses = analyze_game(game, engine)
+                report = generate_report(game, analyses)
+                output_path = _report_path(game, pgn_path)
+                save_report(report, output_path)
+
+                completed += 1
+                print()
+                print(f"Report saved to: {output_path}")
+
+            except Exception as exc:
+                failed += 1
+                print(f"ERROR: {exc}")
+                print(f"Skipping file: {pgn_path}")
+
+    print("=" * 72)
+    print("BATCH ANALYSIS COMPLETE")
+    print(f"Completed: {completed}/{len(pgn_files)}")
+    print(f"Failed:    {failed}/{len(pgn_files)}")
+    print(f"Reports:   {REPORT_DIRECTORY.resolve()}")
 
 
 if __name__ == "__main__":
