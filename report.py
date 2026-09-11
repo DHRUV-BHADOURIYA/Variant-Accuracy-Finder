@@ -49,26 +49,48 @@ def _multipv_available(analyses: list[MoveAnalysis]) -> bool:
     return any(item.engine_candidate_count >= 2 for item in analyses)
 
 
-def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None:
-    if not analyses:
-        return None
-    cps: list[int | None] = [15] + [item.after_ry_cp for item in analyses]
-    win_percents: list[float | None] = [win_percent(15)] + [win_percent(cp) if cp is not None else None for cp in cps[1:]]
-    move_count = len(analyses)
+def _volatility_weights(win_percents: list[float | None], move_count: int) -> list[float | None]:
+    """Calculate one local volatility weight for every analyzed move.
+
+    win_percents[0] is the initial position and win_percents[i + 1] is the
+    position after move i. The window used for move i therefore contains its
+    resulting position and preceding positions, with a maximum size of eight.
+    """
+    if move_count <= 0:
+        return []
+
     window_size = max(2, min(8, move_count // 10))
     window_size = min(window_size, len(win_percents))
-
-    windows: list[list[float | None]] = []
-    windows.extend([win_percents[:window_size]] * max(0, window_size - 2))
-    windows.extend(win_percents[i : i + window_size] for i in range(len(win_percents) - window_size + 1))
-
     weights: list[float | None] = []
-    for window in windows:
-        if any(value is None for value in window):
+
+    for move_index in range(move_count):
+        after_index = move_index + 1
+        end = after_index + 1
+        start = max(0, end - window_size)
+        window = win_percents[start:end]
+        if len(window) < 2 or any(value is None for value in window):
             weights.append(None)
             continue
         values = [value for value in window if value is not None]
         weights.append(max(0.5, min(12.0, pstdev(values))))
+
+    return weights
+
+
+def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None:
+    if not analyses:
+        return None
+
+    # Use the common RY-relative trajectory only for game-level volatility.
+    # Individual move accuracy remains calculated from the mover's team POV.
+    cps: list[int | None] = [15] + [item.after_ry_cp for item in analyses]
+    win_percents: list[float | None] = [
+        win_percent(15.0)
+    ] + [
+        win_percent(float(cp)) if cp is not None else None
+        for cp in cps[1:]
+    ]
+    weights = _volatility_weights(win_percents, len(analyses))
 
     weighted_values: list[tuple[float, float]] = []
     raw_values: list[float] = []
@@ -77,15 +99,23 @@ def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None
             continue
         if item.move.player not in keys and TEAM[item.move.player] not in keys:
             continue
-        if index >= len(weights) or weights[index] is None:
+        weight = weights[index]
+        if weight is None:
             continue
-        weighted_values.append((item.accuracy, weights[index]))
+        weighted_values.append((item.accuracy, weight))
         raw_values.append(item.accuracy)
 
-    if not weighted_values or not raw_values:
+    if not weighted_values:
         return None
-    weighted_mean = sum(value * weight for value, weight in weighted_values) / sum(weight for _, weight in weighted_values)
-    harmonic_mean = 0.0 if any(value <= 0.0 for value in raw_values) else len(raw_values) / sum(1.0 / value for value in raw_values)
+
+    weighted_mean = sum(value * weight for value, weight in weighted_values) / sum(
+        weight for _, weight in weighted_values
+    )
+    harmonic_mean = (
+        0.0
+        if any(value <= 0.0 for value in raw_values)
+        else len(raw_values) / sum(1.0 / value for value in raw_values)
+    )
     return (weighted_mean + harmonic_mean) / 2.0
 
 
@@ -324,91 +354,72 @@ def _game_flow_graph(analyses: list[MoveAnalysis], width: int = 64, height: int 
 
     opening_pad = max(1, plot_width // 2 - 9)
     middle_pad = max(1, plot_width // 2 - 7)
-    lines.append(f"      Ply 1{' ' * max(1, plot_width - 14)}Ply {max_ply}")
-    lines.append(f"      Opening{' ' * opening_pad}Middlegame{' ' * middle_pad}End")
-    lines.append("RY = estimated RY winning probability; BG = 100% - RY.")
+    lines.append(f"      Ply 1{' ' * opening_pad}Opening{' ' * middle_pad}Middlegame{' ' * middle_pad}End")
+    lines.append(f"      0{' ' * max(1, plot_width - 8)}{max_ply}")
+    lines.append("      RY probability estimated from engine evaluations; BG = 100% − RY.")
     return lines
 
 
 def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
-    headers = game.headers
-    names = _player_names(headers)
-    multipv_available = _multipv_available(analyses)
+    names = _player_names(game.headers)
     lines: list[str] = []
     lines.append("4PC VARIANT ACCURACY FINDER — V2.2")
     lines.append("=" * 128)
-    lines.append(f"Game:       {headers.get('GameNr', 'Unknown')}")
-    lines.append(f"Variant:    {headers.get('Variant', 'Unknown')}")
-    lines.append(f"Result:     {headers.get('Result', 'Unknown')}")
-    lines.append(f"Termination:{headers.get('Termination', 'Unknown')}")
+    lines.append(f"Game: {game.headers.get('GameNr', 'Unknown')}")
+    lines.append(f"Result: {game.headers.get('Result', 'Unknown')}")
+    lines.append(f"Termination: {game.headers.get('Termination', 'Unknown')}")
     lines.append("")
-    lines.append("Players:")
-    for color in PLAYERS:
-        lines.append(f"  {color:<7} {names[color]}")
-    lines.append("")
-    lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
-    lines.append("Accuracy model: Lichess AccuracyPercent methodology adapted to 4PC teams.")
-    lines.append("Evaluation: unrestricted position analysis at the configured depth; no searchmoves restriction.")
-    lines.append(f"MultiPV-dependent features: {'available' if multipv_available else 'not available from the selected engine'}.")
-    lines.append("Engine agreement: candidate ranking and decision separation are reported only when usable MultiPV data is available.")
-    lines.append("Fair-play signals: conditional engine agreement, decision separation, error distribution, and #1 streaks when MultiPV is available.")
-    lines.append("Important: these signals measure statistical unusualness; they are not a standalone cheating verdict.")
-    lines.append("")
+    for player in PLAYERS:
+        lines.append(f"{player}: {names[player]} ({TEAM[player]})")
 
-    player_keys = {color: {color} for color in PLAYERS}
-    team_keys = {team: {team} for team in TEAMS}
-    lines.append("SUMMARY")
+    lines.extend(["", *_game_flow_graph(analyses)])
+    lines.extend(["", *_classification_table(analyses)])
+    lines.extend(["", *_feature_summary(analyses)])
+
+    lines.append("")
+    lines.append("MOVE-BY-MOVE ANALYSIS")
     lines.append("-" * 128)
-    for color in PLAYERS:
-        accuracy = _game_accuracy(analyses, player_keys[color])
-        lines.append(f"{color:<7} {names[color]:<24} Accuracy: {_fmt_float(accuracy)}")
-    lines.append("")
-    for team in TEAMS:
-        accuracy = _game_accuracy(analyses, team_keys[team])
-        lines.append(f"Team {team:<3} {'':<24} Accuracy: {_fmt_float(accuracy)}")
-
-    lines.append("")
-    lines.append("FEATURE SUMMARY")
+    header = (
+        "Ply  Player  Move            Before  After   MoverBefore  MoverAfter  Accuracy  Class       "
+        "BestMove        Rank  B-P CP  B-S CP  Criticality      Difficulty"
+    )
+    lines.append(header)
     lines.append("-" * 128)
-    lines.extend(_feature_summary(analyses))
-
-    lines.append("")
-    lines.extend(_classification_table(analyses))
-
-    lines.append("")
-    lines.extend(_game_flow_graph(analyses))
-
-    lines.append("")
-    lines.append("MOVE-BY-MOVE")
-    lines.append("-" * 128)
-    lines.append("Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc   Class       BestMove  Rank Gap  B-S Gap Difficulty Critical")
-    for item in analyses:
-        best_move = item.engine_best_move or "N/A"
-        rank = str(item.played_move_rank) if item.played_move_rank is not None else "N/A"
-        gap = _fmt_score(item.best_vs_played_cp, None)
-        second_gap = _fmt_score(item.best_vs_second_cp, None)
+    for index, item in enumerate(analyses, start=1):
         lines.append(
-            f"{item.move.ply + 1:>3} {item.move.round_number:>2} {item.move.player:<11} {item.move.notation:<12} "
-            f"{_fmt_score(item.before_cp, item.before_mate):>7} {_fmt_score(item.after_cp, item.after_mate):>7} "
-            f"{_fmt_score(item.before_mover_cp, None):>11} {_fmt_score(item.after_mover_cp, None):>10} {_fmt_float(item.accuracy):>6} "
-            f"{item.classification:<11} {best_move:<9} {rank:>4} {gap:>5} {second_gap:>7} {item.decision_difficulty:<16} {item.criticality}"
+            f"{index:>3}  {item.move.player:<6} {item.move.notation:<15} "
+            f"{_fmt_score(item.before_cp, item.before_mate):>7} "
+            f"{_fmt_score(item.after_cp, item.after_mate):>7} "
+            f"{_fmt_score(item.before_mover_cp, None):>11} "
+            f"{_fmt_score(item.after_mover_cp, None):>10} "
+            f"{_fmt_float(item.accuracy):>8}  {item.classification:<11} "
+            f"{item.engine_best_move or '-':<14} "
+            f"{str(item.played_move_rank) if item.played_move_rank is not None else '-':>4} "
+            f"{_fmt_float(item.best_vs_played_cp):>7} "
+            f"{_fmt_float(item.best_vs_second_cp):>7} "
+            f"{item.criticality:<16} {item.decision_difficulty}"
         )
 
     lines.append("")
-    lines.append("Notes")
-    lines.append("- Before/After are raw engine scores from the side-to-move perspective, capped at +/-1000 for Win% conversion.")
-    lines.append("- MoverBefore/MoverAfter are converted to the moving player's team perspective.")
-    lines.append("- Rank is the played move's position among returned MultiPV candidates. Outside means it was not in the returned candidates; it is not automatically a bad move.")
-    lines.append("- When MultiPV is unavailable, rank, best-vs-played, best-vs-second, criticality, and decision-difficulty fields are N/A/UNASSESSED rather than inferred from a single PV.")
-    lines.append("- Decision separation is based on best-vs-second CP. NEAR_EQUIVALENT <30 CP, CLOSE 30-74 CP, DIFFERENT 75-149 CP, VERY_DIFFERENT >=150 CP.")
-    lines.append("- DIFFERENT and VERY_DIFFERENT are called hard-position candidates in the report only as an engine-separation filter; they do not claim human difficulty.")
-    lines.append("- Hard-position #1 rate measures how often the player selected engine #1 when the engine strongly separated its first two choices.")
-    lines.append("- Error statistics use best-vs-played CP from the mover's team perspective and are complementary to Accuracy.")
-    lines.append("- The game-flow graph is a rough ASCII visualization of RY's estimated winning probability across the mainline; BG is the inverse.")
-    lines.append("- The game-flow probability is an engine-score conversion, not a calibrated literal probability of the final result.")
-    return "\n".join(lines)
+    lines.append("PLAYER SUMMARY")
+    lines.append("-" * 128)
+    for player in PLAYERS:
+        items = [item for item in analyses if item.move.player == player and item.accuracy is not None]
+        accuracy = sum(item.accuracy for item in items) / len(items) if items else None
+        lines.append(f"{player:<6} {names[player]:<24} Team={TEAM[player]}  Moves={len(items):>3}  Mean move accuracy={_fmt_float(accuracy)}")
+
+    lines.append("")
+    lines.append("TEAM / GAME SUMMARY")
+    lines.append("-" * 128)
+    for team in TEAMS:
+        items = _team_items(analyses, team)
+        accuracy = _game_accuracy(analyses, {team})
+        move_mean = sum(item.accuracy for item in items) / len(items) if items else None
+        lines.append(f"{team:<6} Moves={len(items):>3}  Mean move accuracy={_fmt_float(move_mean)}  Game accuracy={_fmt_float(accuracy)}")
+
+    return "\n".join(lines) + "\n"
 
 
-def save_report(text: str, output_path: Path) -> None:
+def save_report(report: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(text + "\n", encoding="utf-8")
+    output_path.write_text(report, encoding="utf-8")
