@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # V2 analysis settings.
-ENGINE_PATH = Path(r"C:\Users\dell\Desktop\Testing\Current Best\FirstProject.exe")
+ENGINE_PATH = Path(r"/*PATH TO YOUR ENGINE*/")
 
 ANALYSIS_DEPTH = 20
 ENGINE_THREADS = 1
