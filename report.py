@@ -12,7 +12,6 @@ PLAYERS = ("Red", "Blue", "Yellow", "Green")
 TEAMS = ("RY", "BG")
 CLASSIFICATIONS = ("BEST", "EXCELLENT", "GOOD", "INACCURACY", "MISTAKE", "BLUNDER")
 DIFFICULTIES = ("NEAR_EQUIVALENT", "CLOSE", "DIFFERENT", "VERY_DIFFERENT")
-RANKS = (1, 2, 3, "OUTSIDE")
 
 
 def win_percent(cp: float) -> float:
@@ -150,19 +149,15 @@ def _fair_play_table(analyses: list[MoveAnalysis]) -> list[str]:
     lines = [
         "FAIR-PLAY SIGNALS — RY vs BG",
         "-" * 128,
-        "Metric                         RY                 BG",
     ]
-    for team in TEAMS:
-        pass
 
     rows: list[tuple[str, str, str]] = []
     for team in TEAMS:
         items = _team_items(analyses, team)
-        rank1, rank2, rank3, outside = _rank_stats(items)
+        rank1, _, _, _ = _rank_stats(items)
         hard1, hard_total = _hard_rank1(items)
         losses = [item.best_vs_played_cp for item in items if item.best_vs_played_cp is not None]
         gaps = [item.best_vs_second_cp for item in items if item.best_vs_second_cp is not None]
-        high = [item for item in items if item.decision_difficulty in {"DIFFERENT", "VERY_DIFFERENT"}]
         very_high = [item for item in items if item.decision_difficulty == "VERY_DIFFERENT"]
         rows.append((
             team,
@@ -192,7 +187,6 @@ def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
         f"Moves assessed: {len(assessed)}",
         "Classification counts: " + ", ".join(f"{key}={counts[key]}" for key in counts),
         f"Engine rank #1: {sum(rank == 1 for rank in ranked)}/{len(ranked) if ranked else 0}",
-        f"Engine rank top-3: {sum(rank <= 3 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Average best-vs-second gap: {_fmt_float(sum(critical) / len(critical) if critical else None)} CP",
     ]
 
@@ -253,6 +247,66 @@ def _classification_table(analyses: list[MoveAnalysis]) -> list[str]:
     return lines
 
 
+def _game_flow_graph(analyses: list[MoveAnalysis], width: int = 64, height: int = 11) -> list[str]:
+    """Create a compact ASCII graph of RY's estimated win probability over the game."""
+    values = [
+        (index, win_percent(item.after_ry_cp))
+        for index, item in enumerate(analyses, start=1)
+        if item.after_ry_cp is not None
+    ]
+    if not values:
+        return ["GAME FLOW — RY vs BG", "No RY/BG win-probability data available."]
+
+    values.insert(0, (0, 50.0))
+    max_ply = values[-1][0]
+    if max_ply <= 0:
+        max_ply = 1
+
+    points: list[tuple[int, int]] = []
+    for ply, probability in values:
+        x = round((ply / max_ply) * (width - 1))
+        y = round(((100.0 - probability) / 100.0) * (height - 1))
+        points.append((x, y))
+
+    by_x: dict[int, int] = {}
+    for x, y in points:
+        by_x[x] = y
+    points = sorted(by_x.items())
+
+    plot_offset = 5
+    plot_width = max(1, width - plot_offset)
+    canvas = [[" " for _ in range(width)] for _ in range(height)]
+    for row in range(height):
+        probability = 100 - (row * 100 // (height - 1))
+        label = f"{probability:>3} |"
+        for x in range(min(len(label), width)):
+            canvas[row][x] = label[x]
+
+    plot_points = [(min(plot_width - 1, x), y) for x, y in points]
+
+    for (x1, y1), (x2, y2) in zip(plot_points, plot_points[1:]):
+        steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+        for step in range(steps + 1):
+            x = round(x1 + (x2 - x1) * step / steps)
+            y = round(y1 + (y2 - y1) * step / steps)
+            if 0 <= x < plot_width and 0 <= y < height:
+                canvas[y][plot_offset + x] = "*"
+
+    lines = [
+        "GAME FLOW — RY vs BG",
+        "-" * (plot_offset + plot_width),
+    ]
+    lines.extend("".join(row) for row in canvas)
+    lines.append("     +" + "-" * plot_width)
+
+    opening_pad = max(1, plot_width // 2 - 9)
+    middle_pad = max(1, plot_width // 2 - 7)
+    lines.append(f"      Ply 1{' ' * max(1, plot_width - 14)}Ply {max_ply}")
+    lines.append(f"      Opening{' ' * opening_pad}Middlegame{' ' * middle_pad}End")
+    lines.append("RY = estimated RY winning probability; BG = 100% - RY.")
+    return lines
+
+
 def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     headers = game.headers
     names = _player_names(headers)
@@ -298,6 +352,9 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.extend(_classification_table(analyses))
 
     lines.append("")
+    lines.extend(_game_flow_graph(analyses))
+
+    lines.append("")
     lines.append("MOVE-BY-MOVE")
     lines.append("-" * 128)
     lines.append("Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc   Class       BestMove  Rank Gap  B-S Gap Difficulty Critical")
@@ -322,10 +379,8 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("- DIFFERENT and VERY_DIFFERENT are called hard-position candidates in the report only as an engine-separation filter; they do not claim human difficulty.")
     lines.append("- Hard-position #1 rate measures how often the player selected engine #1 when the engine strongly separated its first two choices.")
     lines.append("- Error statistics use best-vs-played CP from the mover's team perspective and are complementary to Accuracy.")
-    lines.append("- Rank-#1 streaks are descriptive and should be interpreted together with decision separation and population baselines.")
-    lines.append("- These V2.2 signals do not yet use player rating, a legitimate-player population, clock times, or cross-game longitudinal statistics.")
-    lines.append("- The next fair-play layer should establish empirical baselines before converting these features into an anomaly probability or investigation score.")
-    lines.append("- Player and team accuracy summaries use volatility-weighted + harmonic aggregation rather than a simple arithmetic mean.")
+    lines.append("- The game-flow graph is a rough ASCII visualization of RY's estimated winning probability across the mainline; BG is the inverse.")
+    lines.append("- The game-flow probability is an engine-score conversion, not a calibrated literal probability of the final result.")
     return "\n".join(lines)
 
 
