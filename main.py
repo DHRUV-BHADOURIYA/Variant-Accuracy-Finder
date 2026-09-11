@@ -14,38 +14,30 @@ def _collect_pgn_files(input_path: Path) -> list[Path]:
     """Return PGN/text files to analyze, in deterministic order."""
     if input_path.is_file():
         return [input_path]
-
     if input_path.is_dir():
-        # Chess.com 4PC exports in this project commonly use .pgn4.txt.
-        # Accept .pgn, .pgn4 and .txt so the folder can contain mixed exports.
         files = [
-            p
-            for p in input_path.iterdir()
+            p for p in input_path.iterdir()
             if p.is_file() and p.suffix.lower() in {".pgn", ".pgn4", ".txt"}
         ]
         return sorted(files, key=lambda p: p.name.lower())
-
     raise FileNotFoundError(f"Input path not found: {input_path}")
 
 
 def _report_path(game, source_path: Path) -> Path:
-    """Choose a stable report filename, preferring the game number."""
     game_number = str(game.headers.get("GameNr", "")).strip()
     stem = game_number or source_path.stem
     return REPORT_DIRECTORY / f"{stem}_report.txt"
 
 
 def _json_path(game, source_path: Path) -> Path:
-    """Choose the JSON filename matching the text report."""
     game_number = str(game.headers.get("GameNr", "")).strip()
     stem = game_number or source_path.stem
     return REPORT_DIRECTORY / f"{stem}_report.json"
 
 
 def _save_json(game, analyses, source_path: Path, engine: UCIEngine, output_path: Path) -> None:
-    """Save structured game data for later statistical/fair-play analysis."""
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "source_file": str(source_path),
         "game": {
             "headers": dict(game.headers),
@@ -62,13 +54,11 @@ def _save_json(game, analyses, source_path: Path, engine: UCIEngine, output_path
             "starting_fen": START_FEN,
             "scoring": "Lichess-style before/after position evaluation",
             "perspective": "moving player's team (RY vs BG)",
+            "raw_scores_preserved": True,
+            "mate_kept_separate": True,
         },
     }
-
-    output_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def main() -> None:
@@ -80,24 +70,12 @@ def main() -> None:
         )
     )
     parser.add_argument(
-        "input_path",
-        nargs="?",
-        default="png",
+        "input_path", nargs="?", default="png",
         help="Path to one PGN file or a folder containing PGN/text files (default: png)",
     )
-    parser.add_argument(
-        "--engine",
-        default=str(ENGINE_PATH),
-        help=f"Path to the 4PC UCI engine executable (default: {ENGINE_PATH})",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=ENGINE_THREADS,
-        help=f"Engine threads (default: {ENGINE_THREADS})",
-    )
+    parser.add_argument("--engine", default=str(ENGINE_PATH), help=f"Path to the 4PC UCI engine executable (default: {ENGINE_PATH})")
+    parser.add_argument("--threads", type=int, default=ENGINE_THREADS, help=f"Engine threads (default: {ENGINE_THREADS})")
     args = parser.parse_args()
-
     if args.threads < 1:
         parser.error("--threads must be at least 1")
 
@@ -107,7 +85,6 @@ def main() -> None:
         raise FileNotFoundError(f"No supported PGN/text files found in: {input_path}")
 
     REPORT_DIRECTORY.mkdir(parents=True, exist_ok=True)
-
     print("4PC Variant Accuracy Finder — V2.2")
     print(f"Input: {input_path}")
     print(f"Games/files found: {len(pgn_files)}")
@@ -119,32 +96,23 @@ def main() -> None:
     print("Perspective: moving player's team (RY vs BG)")
     print()
 
-    completed = 0
-    failed = 0
-
-    # Keep one Stockfish process alive for the entire batch. The TT is cleared
-    # exactly once at each game boundary and retained throughout that game.
-    with UCIEngine(
-        engine_path=args.engine,
-        threads=args.threads,
-        multipv=ENGINE_MULTIPV,
-    ) as engine:
+    completed = failed = 0
+    with UCIEngine(engine_path=args.engine, threads=args.threads, multipv=ENGINE_MULTIPV) as engine:
         print(f"MultiPV supported: {'yes' if engine.multipv_supported else 'no'}")
-        if engine.multipv_supported:
-            print(f"MultiPV features: enabled (up to {ENGINE_MULTIPV} candidates)")
-        else:
-            print("MultiPV features: disabled; core V2 accuracy remains enabled")
+        print(
+            f"MultiPV features: enabled (up to {ENGINE_MULTIPV} candidates)"
+            if engine.multipv_supported
+            else "MultiPV features: disabled; core V2 accuracy remains enabled"
+        )
         print()
 
         for index, pgn_path in enumerate(pgn_files, start=1):
             print("=" * 72)
             print(f"GAME {index}/{len(pgn_files)}: {pgn_path.name}")
-
             try:
                 game = parse_pgn(pgn_path)
                 if not game.moves:
                     raise ValueError("No 4PC moves were found in the PGN")
-
                 print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
                 print(f"Moves: {len(game.moves)}")
                 print("Clearing transposition table for new game...")
@@ -157,12 +125,9 @@ def main() -> None:
                 json_output_path = _json_path(game, pgn_path)
                 save_report(report, output_path)
                 _save_json(game, analyses, pgn_path, engine, json_output_path)
-
                 completed += 1
-                print()
                 print(f"Report saved to: {output_path}")
                 print(f"JSON saved to:   {json_output_path}")
-
             except Exception as exc:
                 failed += 1
                 print(f"ERROR: {exc}")
