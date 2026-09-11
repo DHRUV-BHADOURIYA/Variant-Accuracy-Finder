@@ -45,6 +45,10 @@ def _player_names(headers: dict[str, str]) -> dict[str, str]:
     return {color: headers.get(color, color) for color in PLAYERS}
 
 
+def _multipv_available(analyses: list[MoveAnalysis]) -> bool:
+    return any(item.engine_candidate_count >= 2 for item in analyses)
+
+
 def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None:
     if not analyses:
         return None
@@ -146,6 +150,13 @@ def _difficulty_table(analyses: list[MoveAnalysis]) -> list[str]:
 
 
 def _fair_play_table(analyses: list[MoveAnalysis]) -> list[str]:
+    if not _multipv_available(analyses):
+        return [
+            "FAIR-PLAY SIGNALS — RY vs BG",
+            "-" * 128,
+            "MultiPV is not available from the selected engine; candidate-based engine-agreement signals are not assessed.",
+        ]
+
     lines = [
         "FAIR-PLAY SIGNALS — RY vs BG",
         "-" * 128,
@@ -159,9 +170,11 @@ def _fair_play_table(analyses: list[MoveAnalysis]) -> list[str]:
         losses = [item.best_vs_played_cp for item in items if item.best_vs_played_cp is not None]
         gaps = [item.best_vs_second_cp for item in items if item.best_vs_second_cp is not None]
         very_high = [item for item in items if item.decision_difficulty == "VERY_DIFFERENT"]
+        hard_pct = 100 * hard1 / hard_total if hard_total else 0.0
+        rank_pct = 100 * rank1 / len(items) if items else 0.0
         rows.append((
             team,
-            f"#1 {rank1}/{len(items)} ({100*rank1/len(items):.2f}%), hard #1 {hard1}/{hard_total} ({100*hard1/hard_total:.2f}%), max streak {_longest_rank1_streak(items)}",
+            f"#1 {rank1}/{len(items)} ({rank_pct:.2f}%), hard #1 {hard1}/{hard_total} ({hard_pct:.2f}%), max streak {_longest_rank1_streak(items)}",
             f"median loss {_fmt_float(median(losses) if losses else None)} CP, mean loss {_fmt_float(sum(losses)/len(losses) if losses else None)} CP, median B-S {_fmt_float(median(gaps) if gaps else None)} CP, very-different {len(very_high)}/{len(items)}"
         ))
     lines.append(f"{'Team':<29} {'Engine agreement':<52} {'Error / separation':<55}")
@@ -180,15 +193,25 @@ def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
         if item.classification in counts:
             counts[item.classification] += 1
 
-    ranked = [item.played_move_rank for item in assessed if item.played_move_rank is not None]
-    critical = [item.best_vs_second_cp for item in assessed if item.best_vs_second_cp is not None]
-
     lines = [
         f"Moves assessed: {len(assessed)}",
         "Classification counts: " + ", ".join(f"{key}={counts[key]}" for key in counts),
+    ]
+
+    if not _multipv_available(assessed):
+        lines.extend([
+            "Engine agreement: Not assessed (selected engine does not provide usable MultiPV candidates).",
+            "Best-vs-second separation: Not assessed.",
+        ])
+        return lines
+
+    ranked = [item.played_move_rank for item in assessed if item.played_move_rank is not None]
+    critical = [item.best_vs_second_cp for item in assessed if item.best_vs_second_cp is not None]
+
+    lines.extend([
         f"Engine rank #1: {sum(rank == 1 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Average best-vs-second gap: {_fmt_float(sum(critical) / len(critical) if critical else None)} CP",
-    ]
+    ])
 
     lines.append("")
     lines.append("ENGINE RANK — RY vs BG")
@@ -310,6 +333,7 @@ def _game_flow_graph(analyses: list[MoveAnalysis], width: int = 64, height: int 
 def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     headers = game.headers
     names = _player_names(headers)
+    multipv_available = _multipv_available(analyses)
     lines: list[str] = []
     lines.append("4PC VARIANT ACCURACY FINDER — V2.2")
     lines.append("=" * 128)
@@ -324,10 +348,10 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("")
     lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
     lines.append("Accuracy model: Lichess AccuracyPercent methodology adapted to 4PC teams.")
-    lines.append("Evaluation: unrestricted MultiPV position analysis at the configured depth.")
-    lines.append("Move scoring: compare the position before and after the actual move; no searchmoves restriction.")
-    lines.append("Engine agreement: rank the played move against returned MultiPV candidates from the mover's team POV.")
-    lines.append("Fair-play signals: conditional engine agreement, decision separation, error distribution, and #1 streaks.")
+    lines.append("Evaluation: unrestricted position analysis at the configured depth; no searchmoves restriction.")
+    lines.append(f"MultiPV-dependent features: {'available' if multipv_available else 'not available from the selected engine'}.")
+    lines.append("Engine agreement: candidate ranking and decision separation are reported only when usable MultiPV data is available.")
+    lines.append("Fair-play signals: conditional engine agreement, decision separation, error distribution, and #1 streaks when MultiPV is available.")
     lines.append("Important: these signals measure statistical unusualness; they are not a standalone cheating verdict.")
     lines.append("")
 
@@ -375,6 +399,7 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("- Before/After are raw engine scores from the side-to-move perspective, capped at +/-1000 for Win% conversion.")
     lines.append("- MoverBefore/MoverAfter are converted to the moving player's team perspective.")
     lines.append("- Rank is the played move's position among returned MultiPV candidates. Outside means it was not in the returned candidates; it is not automatically a bad move.")
+    lines.append("- When MultiPV is unavailable, rank, best-vs-played, best-vs-second, criticality, and decision-difficulty fields are N/A/UNASSESSED rather than inferred from a single PV.")
     lines.append("- Decision separation is based on best-vs-second CP. NEAR_EQUIVALENT <30 CP, CLOSE 30-74 CP, DIFFERENT 75-149 CP, VERY_DIFFERENT >=150 CP.")
     lines.append("- DIFFERENT and VERY_DIFFERENT are called hard-position candidates in the report only as an engine-separation filter; they do not claim human difficulty.")
     lines.append("- Hard-position #1 rate measures how often the player selected engine #1 when the engine strongly separated its first two choices.")
