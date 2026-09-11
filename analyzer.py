@@ -34,16 +34,10 @@ class MoveAnalysis:
     classification: str
     depth: int
     after_ry_cp: int | None
-
-    # Engine agreement: candidates are ranked from the moving player's team POV.
-    # These fields are unavailable when the selected engine has no MultiPV support.
     engine_best_move: str | None
     played_move_rank: int | None
     best_vs_played_cp: int | None
     engine_candidate_count: int
-
-    # Engine-decision separation / fair-play signals.
-    # These are unavailable without multiple engine candidates.
     best_vs_second_cp: int | None
     criticality: str
     decision_difficulty: str
@@ -56,7 +50,6 @@ def _score(line: EngineLine | None) -> tuple[int | None, int | None]:
 
 
 def _score_as_cp(cp: int | None, mate: int | None) -> int | None:
-    """Lichess-style CP representation, capped at +/-1000."""
     if mate is not None:
         return 1000 if mate > 0 else -1000
     if cp is None:
@@ -75,7 +68,6 @@ def _win_percent(cp: int) -> float:
 
 
 def _move_accuracy(before_win: float, after_win: float) -> float:
-    """Current Lichess AccuracyPercent.fromWinPercents implementation."""
     if after_win >= before_win:
         return 100.0
     win_diff = before_win - after_win
@@ -87,7 +79,6 @@ def _move_accuracy(before_win: float, after_win: float) -> float:
 
 
 def _classify_accuracy(accuracy: float | None) -> str:
-    """Provisional move-quality bands; thresholds are intentionally configurable later."""
     if accuracy is None:
         return "UNASSESSED"
     if accuracy >= 99.0:
@@ -103,14 +94,9 @@ def _classify_accuracy(accuracy: float | None) -> str:
     return "BLUNDER"
 
 
-def _candidate_data(
-    lines: dict[int, EngineLine],
-    mover: str,
-) -> list[tuple[str, int]]:
-    """Return exact engine candidates ordered best-to-worst for the mover's team."""
+def _candidate_data(lines: dict[int, EngineLine], mover: str) -> list[tuple[str, int]]:
     candidates: list[tuple[str, int]] = []
     mover_team = TEAM[mover]
-
     for multipv in sorted(lines):
         line = lines[multipv]
         if not line.pv:
@@ -119,10 +105,8 @@ def _candidate_data(
         if cp is None:
             continue
         relative_cp = _team_relative_cp(cp, mover, mover_team)
-        if relative_cp is None:
-            continue
-        candidates.append((line.pv[0], relative_cp))
-
+        if relative_cp is not None:
+            candidates.append((line.pv[0], relative_cp))
     candidates.sort(key=lambda item: item[1], reverse=True)
     return candidates
 
@@ -132,14 +116,11 @@ def _agreement(
     move: ParsedMove,
     multipv_supported: bool,
 ) -> tuple[str | None, int | None, int | None, int | None, int]:
-    """Calculate engine agreement only when genuine MultiPV data is available."""
     if not multipv_supported:
         return None, None, None, None, 0
-
     candidates = _candidate_data(before_result_lines, move.player)
     if len(candidates) < 2:
         return None, None, None, None, 0
-
     best_move, best_cp = candidates[0]
     second_cp = candidates[1][1]
     played_rank = next(
@@ -150,7 +131,6 @@ def _agreement(
 
 
 def _criticality(best_vs_second_cp: int | None) -> str:
-    """Engine separation signal; deliberately not a human-difficulty or cheating score."""
     if best_vs_second_cp is None:
         return "UNASSESSED"
     if best_vs_second_cp >= 150:
@@ -163,7 +143,6 @@ def _criticality(best_vs_second_cp: int | None) -> str:
 
 
 def _decision_difficulty(best_vs_second_cp: int | None) -> str:
-    """Bucket engine choice separation for conditional agreement statistics."""
     if best_vs_second_cp is None:
         return "UNASSESSED"
     if best_vs_second_cp >= 150:
@@ -175,13 +154,15 @@ def _decision_difficulty(best_vs_second_cp: int | None) -> str:
     return "NEAR_EQUIVALENT"
 
 
+def _is_checkmate_move(move: ParsedMove) -> bool:
+    """The supplied 4PC notation marks a game-ending checkmate with '#'."""
+    return "#" in move.notation
+
+
 def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
     state = PositionState(fen=START_FEN)
     results: list[MoveAnalysis] = []
 
-    # Each mainline position is evaluated once. MultiPV is optional: when the
-    # engine supports it, leading alternatives are also used for agreement and
-    # decision-separation features. Core V2 accuracy is identical either way.
     current_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
     current_line = current_result.lines.get(1)
 
@@ -204,12 +185,23 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
         state.play(move)
         next_player = PLAYERS[(index + 1) % 4]
 
-        after_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
-        after_line = after_result.lines.get(1)
-        after_cp_raw, after_mate = _score(after_line)
-        after_cp = _score_as_cp(after_cp_raw, after_mate)
-        after_mover_cp = _team_relative_cp(after_cp, next_player, TEAM[move.player])
-        after_win = _win_percent(after_mover_cp) if after_mover_cp is not None else None
+        # Do not send another `go depth` after a checkmating move. A terminal
+        # position has no legal move and this engine does not emit bestmove for
+        # such a search, which would otherwise make the analyzer wait forever.
+        # From the mover's team POV, a checkmate is a forced +1000 terminal score.
+        if _is_checkmate_move(move):
+            after_mover_cp = 1000
+            after_win = _win_percent(after_mover_cp)
+            after_cp = -1000 if TEAM[next_player] != TEAM[move.player] else 1000
+            after_mate = -1 if after_cp < 0 else 1
+            after_line = None
+        else:
+            after_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
+            after_line = after_result.lines.get(1)
+            after_cp_raw, after_mate = _score(after_line)
+            after_cp = _score_as_cp(after_cp_raw, after_mate)
+            after_mover_cp = _team_relative_cp(after_cp, next_player, TEAM[move.player])
+            after_win = _win_percent(after_mover_cp) if after_mover_cp is not None else None
 
         accuracy = None
         if before_win is not None and after_win is not None:
@@ -250,6 +242,8 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
             )
         )
 
+        if after_line is None:
+            break
         current_result = after_result
         current_line = after_line
 
