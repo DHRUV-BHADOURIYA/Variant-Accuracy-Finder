@@ -114,12 +114,18 @@ class UCIEngine:
 
     @staticmethod
     def _parse_info(line: str) -> EngineLine | None:
+        """Parse standard UCI scores and the engine's bare ``score N`` format."""
         parts = line.split()
         if not parts or parts[0] != "info":
             return None
 
         result = EngineLine()
+        pv_start: int | None = None
+        score_index: int | None = None
         i = 1
+
+        # Fields are parsed independently because this engine emits PV before
+        # score, e.g. ``... pv h2-h3 ... score 193 nps 101271``.
         while i < len(parts):
             key = parts[i]
             if key == "depth" and i + 1 < len(parts):
@@ -152,24 +158,46 @@ class UCIEngine:
                 except ValueError:
                     pass
                 i += 2
-            elif key == "score" and i + 2 < len(parts):
-                kind, value = parts[i + 1], parts[i + 2]
-                try:
-                    if kind == "cp":
-                        result.score_cp = int(value)
-                    elif kind == "mate":
-                        result.mate = int(value)
-                except ValueError:
-                    pass
-                i += 3
-                if i < len(parts) and parts[i] in {"lowerbound", "upperbound"}:
-                    result.bound = parts[i]
-                    i += 1
             elif key == "pv":
-                result.pv = parts[i + 1:]
-                break
+                pv_start = i + 1
+                i += 1
+            elif key == "score":
+                score_index = i
+                i += 1
             else:
                 i += 1
+
+        # Standard UCI: score cp <value> / score mate <value>.
+        # This engine: score <centipawn-value>.
+        if score_index is not None and score_index + 1 < len(parts):
+            kind = parts[score_index + 1]
+            value_index = score_index + 2
+            try:
+                if kind == "cp" and value_index < len(parts):
+                    result.score_cp = int(parts[value_index])
+                    value_index += 1
+                elif kind == "mate" and value_index < len(parts):
+                    result.mate = int(parts[value_index])
+                    value_index += 1
+                else:
+                    result.score_cp = int(kind)
+                    value_index = score_index + 2
+            except ValueError:
+                value_index = score_index + 1
+
+            if value_index < len(parts) and parts[value_index] in {"lowerbound", "upperbound"}:
+                result.bound = parts[value_index]
+
+        if pv_start is not None:
+            # This engine places score after the PV. Stop PV parsing at the
+            # next known metadata token so score/nps values are not treated as moves.
+            pv_end = len(parts)
+            for j in range(pv_start, len(parts)):
+                if parts[j] in {"score", "depth", "multipv", "nodes", "nps", "time", "lowerbound", "upperbound"}:
+                    pv_end = j
+                    break
+            result.pv = parts[pv_start:pv_end]
+
         return result
 
     @staticmethod
@@ -212,9 +240,6 @@ class UCIEngine:
             line = self._readline()
             if line.startswith("info "):
                 parsed = self._parse_info(line)
-                # A valid UCI engine may report score/depth without a PV.
-                # Keep score-only lines because V2 accuracy needs the position
-                # evaluation; MultiPV agreement separately requires PV moves.
                 if parsed is not None and (parsed.pv or parsed.score_cp is not None or parsed.mate is not None):
                     old = result.lines.get(parsed.multipv)
                     if self._should_replace(old, parsed):
@@ -224,10 +249,7 @@ class UCIEngine:
                 result.bestmove = parts[1] if len(parts) > 1 else None
                 break
 
-        # Be defensive: an engine may advertise MultiPV but fail to return
-        # multiple usable root lines. Candidate ranking is only enabled when
-        # genuine multiple PVs are available.
-        if self.multipv > 1 and len(result.lines) < 2:
-            self.multipv_supported = False
-
+        # MultiPV availability is determined by advertised capability. A
+        # single position may legitimately return only one candidate, so do
+        # not globally disable MultiPV based on that position.
         return result
