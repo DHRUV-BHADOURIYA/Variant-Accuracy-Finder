@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from statistics import mean, pstdev
+from statistics import pstdev
 
 from analyzer import MoveAnalysis, TEAM
 from png import Game
@@ -48,21 +48,11 @@ def _player_names(headers: dict[str, str]) -> dict[str, str]:
     return {color: headers.get(color, color) for color in PLAYERS}
 
 
-def _accuracy_with_uncertainty(accuracy: float, weight: float) -> tuple[float, float]:
-    return accuracy, weight
-
-
 def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None:
-    """Port of Lichess AccuracyPercent.gameAccuracy for one group.
-
-    The position WinPercents are kept in fixed RY POV. Each move's accuracy is
-    computed in the mover's POV, then the Lichess volatility-weighted mean and
-    harmonic mean are combined 50/50.
-    """
+    """Port of Lichess AccuracyPercent.gameAccuracy for one group."""
     if not analyses:
         return None
 
-    # Lichess uses Eval.Cp.initial = 15 for the initial position.
     cps: list[int | None] = [15] + [item.after_ry_cp for item in analyses]
     win_percents: list[float | None] = [win_percent(15)] + [
         win_percent(cp) if cp is not None else None for cp in cps[1:]
@@ -116,13 +106,36 @@ def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None
     return (weighted_mean + harmonic_mean) / 2.0
 
 
+def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
+    assessed = [item for item in analyses if item.accuracy is not None]
+    if not assessed:
+        return ["No assessed moves."]
+
+    counts = {name: 0 for name in ("BEST", "EXCELLENT", "GOOD", "INACCURACY", "MISTAKE", "BLUNDER")}
+    for item in assessed:
+        if item.classification in counts:
+            counts[item.classification] += 1
+
+    ranked = [item.played_move_rank for item in assessed if item.played_move_rank is not None]
+    critical = [item.best_vs_second_cp for item in assessed if item.best_vs_second_cp is not None]
+
+    lines = [
+        f"Moves assessed: {len(assessed)}",
+        "Classification counts: " + ", ".join(f"{key}={counts[key]}" for key in counts),
+        f"Engine rank #1: {sum(rank == 1 for rank in ranked)}/{len(ranked) if ranked else 0}",
+        f"Engine rank top-3: {sum(rank <= 3 for rank in ranked)}/{len(ranked) if ranked else 0}",
+        f"Average best-vs-second gap: {_fmt_float(sum(critical) / len(critical) if critical else None)} CP",
+    ]
+    return lines
+
+
 def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     headers = game.headers
     names = _player_names(headers)
 
     lines: list[str] = []
-    lines.append("4PC VARIANT ACCURACY FINDER — V2.0")
-    lines.append("=" * 86)
+    lines.append("4PC VARIANT ACCURACY FINDER — V2.1")
+    lines.append("=" * 128)
     lines.append(f"Game:       {headers.get('GameNr', 'Unknown')}")
     lines.append(f"Variant:    {headers.get('Variant', 'Unknown')}")
     lines.append(f"Result:     {headers.get('Result', 'Unknown')}")
@@ -134,19 +147,18 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.append("")
     lines.append("Teams: RY = Red + Yellow | BG = Blue + Green")
     lines.append("Accuracy model: Lichess AccuracyPercent methodology adapted to 4PC teams.")
-    lines.append("Evaluation: one unrestricted engine evaluation per mainline position at the configured depth.")
+    lines.append("Evaluation: unrestricted MultiPV position analysis at the configured depth.")
     lines.append("Move scoring: compare the position before and after the actual move; no searchmoves restriction.")
-    lines.append("Perspective: evaluations are converted from STM to the moving player's team perspective.")
-    lines.append("Win%: Lichess sigmoid with CP capped at +/-1000.")
-    lines.append("Move accuracy: current Lichess AccuracyPercent formula, including the +1 uncertainty bonus.")
-    lines.append("Game accuracy: 50% volatility-weighted mean + 50% harmonic mean, matching Lichess.")
+    lines.append("Engine agreement: rank the played move against the engine's returned MultiPV candidates from the mover's team POV.")
+    lines.append("Criticality: initial engine-decision measure based on the CP separation between engine #1 and #2.")
+    lines.append("Classification: provisional accuracy bands; these are descriptive features, not cheating verdicts.")
     lines.append("")
 
     player_keys = {color: {color} for color in PLAYERS}
     team_keys = {team: {team} for team in TEAMS}
 
     lines.append("SUMMARY")
-    lines.append("-" * 86)
+    lines.append("-" * 128)
     for color in PLAYERS:
         accuracy = _game_accuracy(analyses, player_keys[color])
         lines.append(f"{color:<7} {names[color]:<24} Accuracy: {_fmt_float(accuracy)}")
@@ -156,13 +168,22 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
         lines.append(f"Team {team:<3} {'':<24} Accuracy: {_fmt_float(accuracy)}")
 
     lines.append("")
+    lines.append("FEATURE SUMMARY")
+    lines.append("-" * 128)
+    lines.extend(_feature_summary(analyses))
+
+    lines.append("")
     lines.append("MOVE-BY-MOVE")
-    lines.append("-" * 86)
+    lines.append("-" * 128)
     lines.append(
-        "Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc"
+        "Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc   Class       BestMove  Rank Gap  B-S Gap Critical"
     )
 
     for item in analyses:
+        best_move = item.engine_best_move or "N/A"
+        rank = str(item.played_move_rank) if item.played_move_rank is not None else "N/A"
+        gap = _fmt_score(item.best_vs_played_cp, None)
+        second_gap = _fmt_score(item.best_vs_second_cp, None)
         lines.append(
             f"{item.move.ply + 1:>3} "
             f"{item.move.round_number:>2} "
@@ -172,18 +193,26 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
             f"{_fmt_score(item.after_cp, item.after_mate):>7} "
             f"{_fmt_score(item.before_mover_cp, None):>11} "
             f"{_fmt_score(item.after_mover_cp, None):>10} "
-            f"{_fmt_float(item.accuracy):>6}"
+            f"{_fmt_float(item.accuracy):>6} "
+            f"{item.classification:<11} "
+            f"{best_move:<9} "
+            f"{rank:>4} "
+            f"{gap:>5} "
+            f"{second_gap:>7} "
+            f"{item.criticality}"
         )
 
     lines.append("")
     lines.append("Notes")
     lines.append("- Before/After are raw engine scores from the side-to-move perspective, capped at +/-1000 for Lichess Win% conversion.")
     lines.append("- MoverBefore/MoverAfter are converted to the moving player's team perspective.")
-    lines.append("- A teammate's next-turn evaluation keeps the sign; an opponent's next-turn evaluation is inverted.")
-    lines.append("- Mate scores are converted to +/-1000 before Win% conversion; mate transitions remain part of the Lichess-style calculation.")
+    lines.append("- Engine candidate scores are also converted to the mover's team perspective before ranking.")
+    lines.append("- Rank is the position of the played UCI move among the returned MultiPV candidates; moves outside the returned MultiPV are unranked, not assumed bad.")
+    lines.append("- Best-vs-played is the engine #1 CP minus the actual resulting-position CP from the mover's team perspective, floored at zero.")
+    lines.append("- Best-vs-second is the CP separation between engine #1 and #2. It is the first criticality signal and does not by itself imply difficulty or cheating.")
+    lines.append("- Classification bands are provisional and should be calibrated against real games before being used in fair-play decisions.")
     lines.append("- The initial position uses Lichess's initial CP value of +15 in the fixed RY perspective for game aggregation.")
     lines.append("- Player and team summaries use the same volatility-weighted + harmonic aggregation, not an arithmetic mean.")
-    lines.append("- The four-player team mapping is RY versus BG; Lichess's White/Black POV is replaced by fixed team POV.")
 
     return "\n".join(lines)
 
