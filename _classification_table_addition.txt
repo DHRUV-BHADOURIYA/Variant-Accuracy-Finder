@@ -1,1 +1,0 @@
-Temporary note: add RY vs BG classification table to report.py.
