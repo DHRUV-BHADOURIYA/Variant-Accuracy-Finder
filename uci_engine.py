@@ -182,7 +182,11 @@ class UCIEngine:
             return False
         if old.bound is not None and new.bound is None:
             return True
-        return bool(new.pv) and not old.pv
+        if new.pv and not old.pv:
+            return True
+        if (new.score_cp is not None or new.mate is not None) and old.score_cp is None and old.mate is None:
+            return True
+        return False
 
     def analyze(
         self,
@@ -208,7 +212,10 @@ class UCIEngine:
             line = self._readline()
             if line.startswith("info "):
                 parsed = self._parse_info(line)
-                if parsed is not None and parsed.pv:
+                # A valid UCI engine may report score/depth without a PV.
+                # Keep score-only lines because V2 accuracy needs the position
+                # evaluation; MultiPV agreement separately requires PV moves.
+                if parsed is not None and (parsed.pv or parsed.score_cp is not None or parsed.mate is not None):
                     old = result.lines.get(parsed.multipv)
                     if self._should_replace(old, parsed):
                         result.lines[parsed.multipv] = parsed
@@ -217,8 +224,9 @@ class UCIEngine:
                 result.bestmove = parts[1] if len(parts) > 1 else None
                 break
 
-        # Be defensive: an engine may accept UCI but fail to honor MultiPV.
-        # If it returned only one PV, treat MultiPV as unavailable from now on.
+        # Be defensive: an engine may advertise MultiPV but fail to return
+        # multiple usable root lines. Candidate ranking is only enabled when
+        # genuine multiple PVs are available.
         if self.multipv > 1 and len(result.lines) < 2:
             self.multipv_supported = False
 
