@@ -421,36 +421,7 @@ The current implementation has several deliberate limitations:
 
 These limitations should be treated as explicit engineering boundaries, not silently ignored.
 
-## 17. Development roadmap
-
-The recommended development order is:
-
-```text
-Correctness
-    -> validate PGN reconstruction
-    -> validate UCI position sequence
-    -> validate score orientation
-    -> validate accuracy mathematics
-    -> validate aggregation
-    -> validate reports
-
-Performance
-    -> profile engine communication
-    -> measure repeated-position overhead
-    -> investigate safe caching/reuse
-    -> benchmark throughput
-
-Accuracy quality
-    -> validate mate transitions
-    -> calibrate win probability
-    -> evaluate alternative aggregation models
-    -> compare against large human-game datasets
-    -> investigate variant-specific expected-points models
-```
-
-Potential improvements should be justified by tests, measurements, or a clear theoretical argument. A more complicated method is not automatically a better method.
-
-## 18. Engineering principles
+## 17. Engineering principles
 
 This project is an experimental accuracy-analysis system, so changes should be evaluated as hypotheses rather than assumptions.
 
@@ -466,7 +437,7 @@ For every proposed modification:
 
 In particular, an output that appears reasonable is not evidence that the underlying evaluation is correct. Search artifacts, perspective errors, transposition-table contamination, and aggregation mistakes can all produce plausible-looking numbers.
 
-## 19. Design principle
+## 18. Design principle
 
 The central principle of Variant Accuracy Finder is:
 
