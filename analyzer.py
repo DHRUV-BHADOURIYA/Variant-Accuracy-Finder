@@ -15,10 +15,14 @@ PLAYERS = ("Red", "Blue", "Yellow", "Green")
 @dataclass
 class MoveAnalysis:
     move: ParsedMove
+    # Raw engine scores. These are never clamped and never converted from mate.
+    before_raw_cp: int | None
     before_cp: int | None
     before_mate: int | None
+    after_raw_cp: int | None
     after_cp: int | None
     after_mate: int | None
+    # Normalized CP used only by the Win%/accuracy model.
     before_mover_cp: int | None
     after_mover_cp: int | None
     before_win_percent: float | None
@@ -35,8 +39,6 @@ class MoveAnalysis:
     criticality: str
     decision_difficulty: str
     # Preserve the deepest engine data used for the before/after decision.
-    # This makes the JSON export useful for later statistical analysis without
-    # requiring Stockfish to be rerun for every future feature.
     before_engine_lines: dict[int, EngineLine]
     before_engine_bestmove: str | None
     after_engine_lines: dict[int, EngineLine]
@@ -49,7 +51,8 @@ def _score(line: EngineLine | None) -> tuple[int | None, int | None]:
     return line.score_cp, line.mate
 
 
-def _score_as_cp(cp: int | None, mate: int | None) -> int | None:
+def _score_for_win_percent(cp: int | None, mate: int | None) -> int | None:
+    """Normalize an engine score only for the Win% model."""
     if mate is not None:
         return 1000 if mate > 0 else -1000
     if cp is None:
@@ -61,6 +64,11 @@ def _team_relative_cp(stm_cp: int | None, stm_player: str, pov_team: str) -> int
     if stm_cp is None:
         return None
     return stm_cp if TEAM[stm_player] == pov_team else -stm_cp
+
+
+def _team_relative_score_for_win_percent(cp: int | None, mate: int | None, stm_player: str, pov_team: str) -> int | None:
+    normalized = _score_for_win_percent(cp, mate)
+    return _team_relative_cp(normalized, stm_player, pov_team)
 
 
 def _win_percent(cp: int) -> float:
@@ -98,10 +106,10 @@ def _candidate_data(lines: dict[int, EngineLine], mover: str) -> list[tuple[str,
         line = lines[multipv]
         if not line.pv:
             continue
-        cp = _score_as_cp(line.score_cp, line.mate)
-        if cp is None:
+        if not line.is_exact or line.mate is not None or line.score_cp is None:
             continue
-        relative_cp = _team_relative_cp(cp, mover, mover_team)
+        # Keep raw CP for engine-agreement/separation statistics.
+        relative_cp = _team_relative_cp(line.score_cp, mover, mover_team)
         if relative_cp is not None:
             candidates.append((line.pv[0], relative_cp))
     candidates.sort(key=lambda item: item[1], reverse=True)
@@ -110,14 +118,15 @@ def _candidate_data(lines: dict[int, EngineLine], mover: str) -> list[tuple[str,
 
 def _agreement(before_result_lines: dict[int, EngineLine], move: ParsedMove, multipv_supported: bool):
     if not multipv_supported:
-        return None, None, None, None, 0
+        return None, None, None, None, None, 0
     candidates = _candidate_data(before_result_lines, move.player)
-    if len(candidates) < 2:
-        return None, None, None, None, 0
+    if not candidates:
+        return None, None, None, None, None, 0
     best_move, best_cp = candidates[0]
-    second_cp = candidates[1][1]
+    second_cp = candidates[1][1] if len(candidates) >= 2 else None
+    played_entry = next((cp for candidate_move, cp in candidates if candidate_move == move.uci), None)
     played_rank = next((i + 1 for i, (candidate_move, _) in enumerate(candidates) if candidate_move == move.uci), None)
-    return best_move, played_rank, best_cp, second_cp, len(candidates)
+    return best_move, played_rank, best_cp, played_entry, second_cp, len(candidates)
 
 
 def _criticality(best_vs_second_cp: int | None) -> str:
@@ -165,11 +174,21 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
 
     for index, move in enumerate(game.moves):
         print(f"Analyzing ply {index + 1}/{len(game.moves)}: {move.notation}")
-        before_cp_raw, before_mate = _score(current_line)
-        before_cp = _score_as_cp(before_cp_raw, before_mate)
-        before_mover_cp = _team_relative_cp(before_cp, move.player, TEAM[move.player])
+        before_raw_cp, before_mate = _score(current_line)
+        before_cp = _score_for_win_percent(before_raw_cp, before_mate)
+        before_mover_cp = _team_relative_score_for_win_percent(
+            before_raw_cp, before_mate, move.player, TEAM[move.player]
+        )
         before_win = _win_percent(before_mover_cp) if before_mover_cp is not None else None
-        engine_best_move, played_move_rank, best_cp, second_cp, engine_candidate_count = _agreement(current_result.lines, move, engine.multipv_supported)
+
+        (
+            engine_best_move,
+            played_move_rank,
+            best_cp,
+            played_root_cp,
+            second_cp,
+            engine_candidate_count,
+        ) = _agreement(current_result.lines, move, engine.multipv_supported)
 
         before_engine_lines = _copy_lines(current_result)
         before_engine_bestmove = current_result.bestmove
@@ -178,30 +197,55 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
         next_player = PLAYERS[(index + 1) % 4]
         after_result: SearchResult | None = None
 
-        if _is_checkmate_move(game, index, move):
-            after_mover_cp = 1000
-            after_win = _win_percent(after_mover_cp)
-            after_cp = 1000 if TEAM[next_player] == TEAM[move.player] else -1000
-            after_mate = 1 if after_cp > 0 else -1
-            after_line = None
-        else:
+        # Always try the engine first. For engines that correctly report a
+        # terminal score, this gives us genuine mate information. The PGN
+        # terminal marker is only a fallback when no exact score is returned.
+        try:
             after_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
-            after_line = after_result.lines.get(1)
-            after_cp_raw, after_mate = _score(after_line)
-            after_cp = _score_as_cp(after_cp_raw, after_mate)
-            after_mover_cp = _team_relative_cp(after_cp, next_player, TEAM[move.player])
-            after_win = _win_percent(after_mover_cp) if after_mover_cp is not None else None
+        except Exception:
+            after_result = None
+
+        after_line = after_result.lines.get(1) if after_result is not None else None
+        after_raw_cp, after_mate = _score(after_line)
+
+        if after_raw_cp is None and after_mate is None and _is_checkmate_move(game, index, move):
+            # Do not invent a mate distance. Represent the terminal result
+            # separately through the Win% normalization only.
+            terminal_mate = 1 if TEAM[next_player] == TEAM[move.player] else -1
+            after_mate = terminal_mate
+            after_raw_cp = None
+
+        after_cp = _score_for_win_percent(after_raw_cp, after_mate)
+        after_mover_cp = _team_relative_score_for_win_percent(
+            after_raw_cp, after_mate, next_player, TEAM[move.player]
+        )
+        after_win = _win_percent(after_mover_cp) if after_mover_cp is not None else None
 
         accuracy = _move_accuracy(before_win, after_win) if before_win is not None and after_win is not None else None
-        best_vs_played_cp = max(0, best_cp - after_mover_cp) if engine.multipv_supported and best_cp is not None and after_mover_cp is not None else None
-        best_vs_second_cp = max(0, best_cp - second_cp) if engine.multipv_supported and best_cp is not None and second_cp is not None else None
+
+        # True root-level best-vs-played: both values come from the same
+        # BEFORE search and are expressed from the mover's team POV. If the
+        # played move is outside the returned MultiPV candidates, leave this
+        # statistic unassessed rather than mixing in the after-position score.
+        best_vs_played_cp = (
+            max(0, best_cp - played_root_cp)
+            if best_cp is not None and played_root_cp is not None
+            else None
+        )
+        best_vs_second_cp = (
+            max(0, best_cp - second_cp)
+            if best_cp is not None and second_cp is not None
+            else None
+        )
         after_ry_cp = _team_relative_cp(after_cp, next_player, "RY")
 
         results.append(
             MoveAnalysis(
                 move,
+                before_raw_cp,
                 before_cp,
                 before_mate,
+                after_raw_cp,
                 after_cp,
                 after_mate,
                 before_mover_cp,
