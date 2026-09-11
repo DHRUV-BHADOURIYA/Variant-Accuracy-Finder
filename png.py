@@ -7,9 +7,9 @@ from pathlib import Path
 
 PLAYERS = ("Red", "Blue", "Yellow", "Green")
 
-# Chess.com 4PC Teams castling is represented in the engine by the king's
-# actual two-square move. The mapping is player-specific because each player
-# starts on a different board edge.
+# Added only for Chess.com 4PC castling. All existing parser behavior remains
+# unchanged; castling is normalized to the king's two-square move for the
+# appropriate player/board edge.
 CASTLING_UCI = {
     "Red": {"O-O": "h1j1", "O-O-O": "h1f1"},
     "Blue": {"O-O": "a7a5", "O-O-O": "a7a9"},
@@ -55,8 +55,8 @@ def _normalize_move(token: str, player: str | None = None) -> str | None:
     if not token or token in {"...", "#", "++"}:
         return None
 
-    # Castling is legal notation in Chess.com 4PC PGNs and has no coordinates
-    # for _COORD_RE to extract. It must be normalized before coordinate parsing.
+    # Added: Chess.com 4PC castling has no coordinates, so handle it before
+    # the existing coordinate-based normalization.
     castle = token.upper()
     castle = re.sub(r"[+#]+$", "", castle)
     if castle in {"O-O", "0-0", "O-O-O", "0-0-0"}:
