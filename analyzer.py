@@ -41,9 +41,10 @@ class MoveAnalysis:
     best_vs_played_cp: int | None
     engine_candidate_count: int
 
-    # Initial criticality measure: separation between engine #1 and #2.
+    # Engine-decision separation / fair-play signals.
     best_vs_second_cp: int | None
     criticality: str
+    decision_difficulty: str
 
 
 def _score(line: EngineLine | None) -> tuple[int | None, int | None]:
@@ -107,7 +108,6 @@ def _candidate_data(
     """Return exact engine candidates ordered best-to-worst for the mover's team."""
     candidates: list[tuple[str, int]] = []
     mover_team = TEAM[mover]
-    stm_player = mover
 
     for multipv in sorted(lines):
         line = lines[multipv]
@@ -116,7 +116,7 @@ def _candidate_data(
         cp = _score_as_cp(line.score_cp, line.mate)
         if cp is None:
             continue
-        relative_cp = _team_relative_cp(cp, stm_player, mover_team)
+        relative_cp = _team_relative_cp(cp, mover, mover_team)
         if relative_cp is None:
             continue
         candidates.append((line.pv[0], relative_cp))
@@ -140,14 +140,11 @@ def _agreement(
         (index + 1 for index, (candidate_move, _) in enumerate(candidates) if candidate_move == move.uci),
         None,
     )
-
-    # The played move's actual child evaluation is more authoritative than a
-    # candidate PV score, so this is filled by the caller after evaluating the child.
     return best_move, played_rank, best_cp, second_cp, len(candidates)
 
 
 def _criticality(best_vs_second_cp: int | None) -> str:
-    """Initial engine-separation criticality; deliberately not a cheating score."""
+    """Engine separation signal; deliberately not a human-difficulty or cheating score."""
     if best_vs_second_cp is None:
         return "UNASSESSED"
     if best_vs_second_cp >= 150:
@@ -157,6 +154,19 @@ def _criticality(best_vs_second_cp: int | None) -> str:
     if best_vs_second_cp >= 30:
         return "MEDIUM"
     return "LOW"
+
+
+def _decision_difficulty(best_vs_second_cp: int | None) -> str:
+    """Bucket engine choice separation for conditional agreement statistics."""
+    if best_vs_second_cp is None:
+        return "UNASSESSED"
+    if best_vs_second_cp >= 150:
+        return "VERY_DIFFERENT"
+    if best_vs_second_cp >= 75:
+        return "DIFFERENT"
+    if best_vs_second_cp >= 30:
+        return "CLOSE"
+    return "NEAR_EQUIVALENT"
 
 
 def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
@@ -198,8 +208,6 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
         if before_win is not None and after_win is not None:
             accuracy = _move_accuracy(before_win, after_win)
 
-        # Use the actual resulting position to measure how well the played move
-        # scored from the mover's team perspective.
         best_vs_played_cp = None
         if best_cp is not None and after_mover_cp is not None:
             best_vs_played_cp = max(0, best_cp - after_mover_cp)
@@ -231,6 +239,7 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
                 engine_candidate_count=engine_candidate_count,
                 best_vs_second_cp=best_vs_second_cp,
                 criticality=_criticality(best_vs_second_cp),
+                decision_difficulty=_decision_difficulty(best_vs_second_cp),
             )
         )
 
