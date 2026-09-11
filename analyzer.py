@@ -36,12 +36,14 @@ class MoveAnalysis:
     after_ry_cp: int | None
 
     # Engine agreement: candidates are ranked from the moving player's team POV.
+    # These fields are unavailable when the selected engine has no MultiPV support.
     engine_best_move: str | None
     played_move_rank: int | None
     best_vs_played_cp: int | None
     engine_candidate_count: int
 
     # Engine-decision separation / fair-play signals.
+    # These are unavailable without multiple engine candidates.
     best_vs_second_cp: int | None
     criticality: str
     decision_difficulty: str
@@ -128,14 +130,18 @@ def _candidate_data(
 def _agreement(
     before_result_lines: dict[int, EngineLine],
     move: ParsedMove,
-) -> tuple[str | None, int | None, int | None, int | None, int | None]:
-    """Calculate engine rank and gaps from the mover's team perspective."""
+    multipv_supported: bool,
+) -> tuple[str | None, int | None, int | None, int | None, int]:
+    """Calculate engine agreement only when genuine MultiPV data is available."""
+    if not multipv_supported:
+        return None, None, None, None, 0
+
     candidates = _candidate_data(before_result_lines, move.player)
-    if not candidates:
-        return None, None, None, None, None
+    if len(candidates) < 2:
+        return None, None, None, None, 0
 
     best_move, best_cp = candidates[0]
-    second_cp = candidates[1][1] if len(candidates) >= 2 else None
+    second_cp = candidates[1][1]
     played_rank = next(
         (index + 1 for index, (candidate_move, _) in enumerate(candidates) if candidate_move == move.uci),
         None,
@@ -173,8 +179,9 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
     state = PositionState(fen=START_FEN)
     results: list[MoveAnalysis] = []
 
-    # Each mainline position is evaluated once. MultiPV=3 gives us the engine's
-    # leading alternatives at the position before the played move.
+    # Each mainline position is evaluated once. MultiPV is optional: when the
+    # engine supports it, leading alternatives are also used for agreement and
+    # decision-separation features. Core V2 accuracy is identical either way.
     current_result = engine.analyze(state.fen, state.uci_moves(), ANALYSIS_DEPTH)
     current_line = current_result.lines.get(1)
 
@@ -192,7 +199,7 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
             best_cp,
             second_cp,
             engine_candidate_count,
-        ) = _agreement(current_result.lines, move)
+        ) = _agreement(current_result.lines, move, engine.multipv_supported)
 
         state.play(move)
         next_player = PLAYERS[(index + 1) % 4]
@@ -209,11 +216,11 @@ def analyze_game(game: Game, engine: UCIEngine) -> list[MoveAnalysis]:
             accuracy = _move_accuracy(before_win, after_win)
 
         best_vs_played_cp = None
-        if best_cp is not None and after_mover_cp is not None:
+        if engine.multipv_supported and best_cp is not None and after_mover_cp is not None:
             best_vs_played_cp = max(0, best_cp - after_mover_cp)
 
         best_vs_second_cp = None
-        if best_cp is not None and second_cp is not None:
+        if engine.multipv_supported and best_cp is not None and second_cp is not None:
             best_vs_second_cp = max(0, best_cp - second_cp)
 
         after_ry_cp = _team_relative_cp(after_cp, next_player, "RY")
