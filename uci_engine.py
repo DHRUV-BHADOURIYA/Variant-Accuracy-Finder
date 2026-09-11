@@ -36,6 +36,7 @@ class UCIEngine:
         self.engine_path = engine_path
         self.threads = threads
         self.multipv = multipv
+        self.multipv_supported = False
         self.process: subprocess.Popen[str] | None = None
 
     def __enter__(self) -> "UCIEngine":
@@ -54,10 +55,14 @@ class UCIEngine:
             text=True,
             bufsize=1,
         )
+
         self._send("uci")
-        self._wait_for("uciok")
+        self._wait_for_uci()
+
         self._send(f"setoption name Threads value {self.threads}")
-        self._send(f"setoption name MultiPV value {self.multipv}")
+        if self.multipv_supported and self.multipv > 1:
+            self._send(f"setoption name MultiPV value {self.multipv}")
+
         self._send("isready")
         self._wait_for("readyok")
 
@@ -89,6 +94,16 @@ class UCIEngine:
     def _wait_for(self, expected: str) -> None:
         while True:
             if self._readline().strip() == expected:
+                return
+
+    def _wait_for_uci(self) -> None:
+        """Consume UCI initialization output and detect advertised capabilities."""
+        self.multipv_supported = False
+        while True:
+            line = self._readline().strip()
+            if line.lower().startswith("option name multipv "):
+                self.multipv_supported = True
+            if line == "uciok":
                 return
 
     def clear_hash(self) -> None:
@@ -201,4 +216,10 @@ class UCIEngine:
                 parts = line.split()
                 result.bestmove = parts[1] if len(parts) > 1 else None
                 break
+
+        # Be defensive: an engine may accept UCI but fail to honor MultiPV.
+        # If it returned only one PV, treat MultiPV as unavailable from now on.
+        if self.multipv > 1 and len(result.lines) < 2:
+            self.multipv_supported = False
+
         return result
