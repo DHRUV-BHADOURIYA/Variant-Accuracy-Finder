@@ -101,13 +101,35 @@ def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
     ranked = [item.played_move_rank for item in assessed if item.played_move_rank is not None]
     critical = [item.best_vs_second_cp for item in assessed if item.best_vs_second_cp is not None]
 
-    return [
+    lines = [
         f"Moves assessed: {len(assessed)}",
         "Classification counts: " + ", ".join(f"{key}={counts[key]}" for key in counts),
         f"Engine rank #1: {sum(rank == 1 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Engine rank top-3: {sum(rank <= 3 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Average best-vs-second gap: {_fmt_float(sum(critical) / len(critical) if critical else None)} CP",
     ]
+
+    lines.append("")
+    lines.append("ENGINE RANK — RY vs BG")
+    lines.append("-" * 128)
+    lines.append("Team   Assessed   Rank #1       Rank #1 %    Top-3       Top-3 %")
+    for team in TEAMS:
+        team_ranked = [
+            item.played_move_rank
+            for item in assessed
+            if TEAM[item.move.player] == team and item.played_move_rank is not None
+        ]
+        total = len(team_ranked)
+        rank1 = sum(rank == 1 for rank in team_ranked)
+        top3 = sum(rank <= 3 for rank in team_ranked)
+        rank1_pct = 100.0 * rank1 / total if total else 0.0
+        top3_pct = 100.0 * top3 / total if total else 0.0
+        lines.append(
+            f"{team:<6} {total:>8}   {rank1:>4}/{total:<5} {rank1_pct:>8.2f}%   "
+            f"{top3:>4}/{total:<5} {top3_pct:>8.2f}%"
+        )
+
+    return lines
 
 
 def _classification_counts(analyses: list[MoveAnalysis], team: str) -> dict[str, int]:
