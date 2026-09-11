@@ -1,12 +1,11 @@
 from pathlib import Path
 
-# V1 evaluation settings.
-# The analyzer uses a single principal variation because its score is the
-# authoritative root evaluation used for accuracy calculations.
+# V2 analysis settings.
 ENGINE_PATH = Path(r"C:\Users\dell\Desktop\Testing\Current Best\FirstProject.exe")
 
 ANALYSIS_DEPTH = 20
 ENGINE_THREADS = 1
+ENGINE_MULTIPV = 3
 REPORT_DIRECTORY = Path("reports")
 
 # Exact 4PC starting position used by the engine.
