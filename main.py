@@ -1,8 +1,10 @@
 import argparse
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from analyzer import analyze_game
-from config import ANALYSIS_DEPTH, ENGINE_MULTIPV, ENGINE_THREADS, ENGINE_PATH, REPORT_DIRECTORY
+from config import ANALYSIS_DEPTH, ENGINE_MULTIPV, ENGINE_THREADS, ENGINE_PATH, REPORT_DIRECTORY, START_FEN
 from png import parse_pgn
 from report import generate_report, save_report
 from uci_engine import UCIEngine
@@ -33,11 +35,48 @@ def _report_path(game, source_path: Path) -> Path:
     return REPORT_DIRECTORY / f"{stem}_report.txt"
 
 
+def _json_path(game, source_path: Path) -> Path:
+    """Choose the JSON filename matching the text report."""
+    game_number = str(game.headers.get("GameNr", "")).strip()
+    stem = game_number or source_path.stem
+    return REPORT_DIRECTORY / f"{stem}_report.json"
+
+
+def _save_json(game, analyses, source_path: Path, engine: UCIEngine, output_path: Path) -> None:
+    """Save structured game data for later statistical/fair-play analysis."""
+    payload = {
+        "schema_version": "1.0",
+        "source_file": str(source_path),
+        "game": {
+            "headers": dict(game.headers),
+            "move_count_in_source": len(game.moves),
+            "move_count_analyzed": len(analyses),
+            "moves": [asdict(analysis) for analysis in analyses],
+        },
+        "analysis_configuration": {
+            "engine_path": str(engine.engine_path),
+            "analysis_depth": ANALYSIS_DEPTH,
+            "threads": engine.threads,
+            "multipv_requested": ENGINE_MULTIPV,
+            "multipv_supported": engine.multipv_supported,
+            "starting_fen": START_FEN,
+            "scoring": "Lichess-style before/after position evaluation",
+            "perspective": "moving player's team (RY vs BG)",
+        },
+    }
+
+    output_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Analyze one Chess.com 4PC PGN file or every supported PGN/text file "
-            "inside a folder and produce a report for each game."
+            "inside a folder and produce a text report plus structured JSON data "
+            "for each game."
         )
     )
     parser.add_argument(
@@ -83,8 +122,8 @@ def main() -> None:
     completed = 0
     failed = 0
 
-    # Keep one Stockfish process alive for the entire batch. This avoids
-    # repeatedly starting/stopping the engine between games.
+    # Keep one Stockfish process alive for the entire batch. The TT is cleared
+    # exactly once at each game boundary and retained throughout that game.
     with UCIEngine(
         engine_path=args.engine,
         threads=args.threads,
@@ -112,16 +151,17 @@ def main() -> None:
                 engine.clear_hash()
                 print()
 
-                # The TT is cleared exactly once here, at the game boundary.
-                # It remains available across all positions/moves within this game.
                 analyses = analyze_game(game, engine)
                 report = generate_report(game, analyses)
                 output_path = _report_path(game, pgn_path)
+                json_output_path = _json_path(game, pgn_path)
                 save_report(report, output_path)
+                _save_json(game, analyses, pgn_path, engine, json_output_path)
 
                 completed += 1
                 print()
                 print(f"Report saved to: {output_path}")
+                print(f"JSON saved to:   {json_output_path}")
 
             except Exception as exc:
                 failed += 1
