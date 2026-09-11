@@ -37,12 +37,12 @@ def main() -> None:
     if not game.moves:
         raise ValueError("No 4PC moves were found in the PGN")
 
-    print("4PC Variant Accuracy Finder — V2.1")
+    print("4PC Variant Accuracy Finder — V2.2")
     print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
     print(f"Moves: {len(game.moves)}")
     print(f"Engine: {args.engine}")
     print(f"Depth: {ANALYSIS_DEPTH}")
-    print(f"MultiPV: {ENGINE_MULTIPV} (move agreement + criticality)")
+    print(f"MultiPV requested: {ENGINE_MULTIPV}")
     print(f"Threads: {args.threads}")
     print("Scoring: Lichess-style before/after position evaluation")
     print("Perspective: moving player's team (RY vs BG)")
@@ -53,6 +53,12 @@ def main() -> None:
         threads=args.threads,
         multipv=ENGINE_MULTIPV,
     ) as engine:
+        print(f"MultiPV supported: {'yes' if engine.multipv_supported else 'no'}")
+        if engine.multipv_supported:
+            print(f"MultiPV features: enabled (up to {ENGINE_MULTIPV} candidates)")
+        else:
+            print("MultiPV features: disabled; core V2 accuracy remains enabled")
+        print()
         analyses = analyze_game(game, engine)
 
     report = generate_report(game, analyses)
