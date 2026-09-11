@@ -108,8 +108,12 @@ def main() -> None:
 
                 print(f"Game: {game.headers.get('GameNr', 'Unknown')}")
                 print(f"Moves: {len(game.moves)}")
+                print("Clearing transposition table for new game...")
+                engine.clear_hash()
                 print()
 
+                # The TT is cleared exactly once here, at the game boundary.
+                # It remains available across all positions/moves within this game.
                 analyses = analyze_game(game, engine)
                 report = generate_report(game, analyses)
                 output_path = _report_path(game, pgn_path)
