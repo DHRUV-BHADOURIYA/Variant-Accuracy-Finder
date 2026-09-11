@@ -10,6 +10,7 @@ from png import Game
 
 PLAYERS = ("Red", "Blue", "Yellow", "Green")
 TEAMS = ("RY", "BG")
+CLASSIFICATIONS = ("BEST", "EXCELLENT", "GOOD", "INACCURACY", "MISTAKE", "BLUNDER")
 
 
 def win_percent(cp: float) -> float:
@@ -25,10 +26,7 @@ def lichess_accuracy(before_cp: float, after_cp: float) -> float:
     if after >= before:
         return 100.0
     win_diff = before - after
-    raw = (
-        103.1668100711649 * math.exp(-0.04354415386753951 * win_diff)
-        - 3.166924740191411
-    )
+    raw = 103.1668100711649 * math.exp(-0.04354415386753951 * win_diff) - 3.166924740191411
     return max(0.0, min(100.0, raw + 1.0))
 
 
@@ -49,25 +47,18 @@ def _player_names(headers: dict[str, str]) -> dict[str, str]:
 
 
 def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None:
-    """Port of Lichess AccuracyPercent.gameAccuracy for one group."""
     if not analyses:
         return None
 
     cps: list[int | None] = [15] + [item.after_ry_cp for item in analyses]
-    win_percents: list[float | None] = [win_percent(15)] + [
-        win_percent(cp) if cp is not None else None for cp in cps[1:]
-    ]
-
+    win_percents: list[float | None] = [win_percent(15)] + [win_percent(cp) if cp is not None else None for cp in cps[1:]]
     move_count = len(analyses)
     window_size = max(2, min(8, move_count // 10))
     window_size = min(window_size, len(win_percents))
 
     windows: list[list[float | None]] = []
     windows.extend([win_percents[:window_size]] * max(0, window_size - 2))
-    windows.extend(
-        win_percents[i : i + window_size]
-        for i in range(len(win_percents) - window_size + 1)
-    )
+    windows.extend(win_percents[i : i + window_size] for i in range(len(win_percents) - window_size + 1))
 
     weights: list[float | None] = []
     for window in windows:
@@ -75,12 +66,10 @@ def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None
             weights.append(None)
             continue
         values = [value for value in window if value is not None]
-        weight = max(0.5, min(12.0, pstdev(values)))
-        weights.append(weight)
+        weights.append(max(0.5, min(12.0, pstdev(values))))
 
     weighted_values: list[tuple[float, float]] = []
     raw_values: list[float] = []
-
     for index, item in enumerate(analyses):
         if item.accuracy is None:
             continue
@@ -94,15 +83,8 @@ def _game_accuracy(analyses: list[MoveAnalysis], keys: set[str]) -> float | None
     if not weighted_values or not raw_values:
         return None
 
-    weighted_mean = sum(value * weight for value, weight in weighted_values) / sum(
-        weight for _, weight in weighted_values
-    )
-
-    if any(value <= 0.0 for value in raw_values):
-        harmonic_mean = 0.0
-    else:
-        harmonic_mean = len(raw_values) / sum(1.0 / value for value in raw_values)
-
+    weighted_mean = sum(value * weight for value, weight in weighted_values) / sum(weight for _, weight in weighted_values)
+    harmonic_mean = 0.0 if any(value <= 0.0 for value in raw_values) else len(raw_values) / sum(1.0 / value for value in raw_values)
     return (weighted_mean + harmonic_mean) / 2.0
 
 
@@ -111,7 +93,7 @@ def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
     if not assessed:
         return ["No assessed moves."]
 
-    counts = {name: 0 for name in ("BEST", "EXCELLENT", "GOOD", "INACCURACY", "MISTAKE", "BLUNDER")}
+    counts = {name: 0 for name in CLASSIFICATIONS}
     for item in assessed:
         if item.classification in counts:
             counts[item.classification] += 1
@@ -119,13 +101,44 @@ def _feature_summary(analyses: list[MoveAnalysis]) -> list[str]:
     ranked = [item.played_move_rank for item in assessed if item.played_move_rank is not None]
     critical = [item.best_vs_second_cp for item in assessed if item.best_vs_second_cp is not None]
 
-    lines = [
+    return [
         f"Moves assessed: {len(assessed)}",
         "Classification counts: " + ", ".join(f"{key}={counts[key]}" for key in counts),
         f"Engine rank #1: {sum(rank == 1 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Engine rank top-3: {sum(rank <= 3 for rank in ranked)}/{len(ranked) if ranked else 0}",
         f"Average best-vs-second gap: {_fmt_float(sum(critical) / len(critical) if critical else None)} CP",
     ]
+
+
+def _classification_counts(analyses: list[MoveAnalysis], team: str) -> dict[str, int]:
+    counts = {classification: 0 for classification in CLASSIFICATIONS}
+    for item in analyses:
+        if TEAM[item.move.player] != team:
+            continue
+        classification = item.classification
+        if classification in counts:
+            counts[classification] += 1
+    return counts
+
+
+def _classification_table(analyses: list[MoveAnalysis]) -> list[str]:
+    ry = _classification_counts(analyses, "RY")
+    bg = _classification_counts(analyses, "BG")
+    ry_total = sum(ry.values())
+    bg_total = sum(bg.values())
+
+    lines = [
+        "MOVE CLASSIFICATION — RY vs BG",
+        "-" * 128,
+        "Category       RY Count   RY %       BG Count   BG %",
+    ]
+    for classification in CLASSIFICATIONS:
+        ry_count = ry[classification]
+        bg_count = bg[classification]
+        ry_pct = 100.0 * ry_count / ry_total if ry_total else 0.0
+        bg_pct = 100.0 * bg_count / bg_total if bg_total else 0.0
+        lines.append(f"{classification:<14} {ry_count:>7} {ry_pct:>7.2f}%   {bg_count:>8} {bg_pct:>7.2f}%")
+    lines.append(f"{'TOTAL':<14} {ry_total:>7} {'100.00%' if ry_total else 'N/A':>8}   {bg_total:>8} {'100.00%' if bg_total else 'N/A':>7}")
     return lines
 
 
@@ -173,11 +186,12 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
     lines.extend(_feature_summary(analyses))
 
     lines.append("")
+    lines.extend(_classification_table(analyses))
+
+    lines.append("")
     lines.append("MOVE-BY-MOVE")
     lines.append("-" * 128)
-    lines.append(
-        "Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc   Class       BestMove  Rank Gap  B-S Gap Critical"
-    )
+    lines.append("Ply Rd Player       Played       Before   After    MoverBefore MoverAfter  Acc   Class       BestMove  Rank Gap  B-S Gap Critical")
 
     for item in analyses:
         best_move = item.engine_best_move or "N/A"
@@ -185,21 +199,10 @@ def generate_report(game: Game, analyses: list[MoveAnalysis]) -> str:
         gap = _fmt_score(item.best_vs_played_cp, None)
         second_gap = _fmt_score(item.best_vs_second_cp, None)
         lines.append(
-            f"{item.move.ply + 1:>3} "
-            f"{item.move.round_number:>2} "
-            f"{item.move.player:<11} "
-            f"{item.move.notation:<12} "
-            f"{_fmt_score(item.before_cp, item.before_mate):>7} "
-            f"{_fmt_score(item.after_cp, item.after_mate):>7} "
-            f"{_fmt_score(item.before_mover_cp, None):>11} "
-            f"{_fmt_score(item.after_mover_cp, None):>10} "
-            f"{_fmt_float(item.accuracy):>6} "
-            f"{item.classification:<11} "
-            f"{best_move:<9} "
-            f"{rank:>4} "
-            f"{gap:>5} "
-            f"{second_gap:>7} "
-            f"{item.criticality}"
+            f"{item.move.ply + 1:>3} {item.move.round_number:>2} {item.move.player:<11} {item.move.notation:<12} "
+            f"{_fmt_score(item.before_cp, item.before_mate):>7} {_fmt_score(item.after_cp, item.after_mate):>7} "
+            f"{_fmt_score(item.before_mover_cp, None):>11} {_fmt_score(item.after_mover_cp, None):>10} {_fmt_float(item.accuracy):>6} "
+            f"{item.classification:<11} {best_move:<9} {rank:>4} {gap:>5} {second_gap:>7} {item.criticality}"
         )
 
     lines.append("")
